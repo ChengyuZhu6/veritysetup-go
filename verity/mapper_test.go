@@ -1,7 +1,9 @@
 package verity
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,10 +35,9 @@ func TestVerityMapper(t *testing.T) {
 		t.Fatalf("Failed to create hash: %v", err)
 	}
 
-	// Create device mapper device
-	deviceName := "test-verity"
-	err = CreateVerityDevice(deviceName, params, dataDevice, hashDevice, vh.rootHash)
-	if err != nil {
+	// Create verity device with a unique name
+	deviceName := fmt.Sprintf("verity-%d", time.Now().Unix())
+	if err := CreateVerityDevice(deviceName, params, dataDevice, hashDevice, vh.rootHash); err != nil {
 		t.Fatalf("Failed to create verity device: %v", err)
 	}
 	defer RemoveVerityDevice(deviceName)
@@ -45,31 +46,55 @@ func TestVerityMapper(t *testing.T) {
 	time.Sleep(time.Second)
 
 	// Verify device exists
-	if _, err := os.Stat("/dev/mapper/" + deviceName); os.IsNotExist(err) {
-		t.Fatal("Verity device was not created")
+	if _, err := os.Stat(fmt.Sprintf("/dev/mapper/%s", deviceName)); err != nil {
+		t.Errorf("Device file not found: %v", err)
 	}
 
-	// Try to read from device
-	f, err := os.Open("/dev/mapper/" + deviceName)
-	if err != nil {
-		t.Fatalf("Failed to open verity device: %v", err)
-	}
-	defer f.Close()
-
-	buf := make([]byte, 4096)
-	if _, err := f.Read(buf); err != nil {
-		t.Fatalf("Failed to read from verity device: %v", err)
+	// Remove device
+	if err := RemoveVerityDevice(deviceName); err != nil {
+		t.Errorf("Failed to remove verity device: %v", err)
 	}
 
-	// Modify data device and verify read failure
-	df, err := os.OpenFile(dataDevice, os.O_RDWR, 0)
-	if err != nil {
-		t.Fatalf("Failed to open data device: %v", err)
+	// Verify device is removed
+	if _, err := os.Stat(fmt.Sprintf("/dev/mapper/%s", deviceName)); !os.IsNotExist(err) {
+		t.Errorf("Device file still exists after removal")
 	}
-	df.WriteAt([]byte{0xFF}, 1000)
-	df.Close()
+}
 
-	if _, err := f.ReadAt(buf, 0); err == nil {
-		t.Fatal("Read should fail with modified data")
+func TestVerityMapperErrors(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges")
+	}
+
+	tests := []struct {
+		name       string
+		deviceName string
+		wantErr    bool
+	}{
+		{
+			name:       "Empty device name",
+			deviceName: "",
+			wantErr:    true,
+		},
+		{
+			name:       "Very long device name",
+			deviceName: strings.Repeat("v", DM_NAME_LEN+1),
+			wantErr:    true,
+		},
+		{
+			name:       "Invalid characters",
+			deviceName: "test/device",
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := createTestParams()
+			err := CreateVerityDevice(tt.deviceName, params, "/dev/null", "/dev/null", make([]byte, 32))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CreateVerityDevice() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }

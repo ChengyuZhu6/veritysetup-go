@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"fmt"
 	"io"
+	"log"
 	"os"
 )
 
@@ -18,12 +19,17 @@ type VerityHash struct {
 
 // NewVerityHash creates a new VerityHash instance
 func NewVerityHash(params *VerityParams, dataDevice, hashDevice string, rootHash []byte) *VerityHash {
-	return &VerityHash{
+	vh := &VerityHash{
 		params:     params,
 		dataDevice: dataDevice,
 		hashDevice: hashDevice,
-		rootHash:   rootHash,
+		rootHash:   make([]byte, 32),
 	}
+	// 确保正确复制根哈希
+	if rootHash != nil {
+		copy(vh.rootHash, rootHash)
+	}
+	return vh
 }
 
 // Verify verifies the verity hash tree
@@ -44,28 +50,31 @@ type hashTreeLevel struct {
 
 // calculateHashLevels calculates the offsets and sizes for each level of the hash tree
 func (vh *VerityHash) calculateHashLevels() ([]hashTreeLevel, error) {
-	hashPerBlock := vh.params.HashBlockSize / uint32(len(vh.rootHash))
+	hashPerBlock := vh.params.HashBlockSize / 32 // SHA256 hash size is 32 bytes
 	levels := make([]hashTreeLevel, 0)
 
 	blocks := vh.params.DataSize
 	offset := vh.params.HashAreaOffset
 
+	// First level starts at the offset
+	hashOffset := offset
+
 	// Calculate each level from bottom up
 	for blocks > 1 {
 		level := hashTreeLevel{
-			offset: offset,
+			offset: hashOffset,
 			size:   blocks,
 		}
-		levels = append(levels, level)
+		levels = append(levels, level) // Append level
 
 		// Calculate next level
 		blocks = (blocks + uint64(hashPerBlock) - 1) / uint64(hashPerBlock)
-		offset += blocks * uint64(vh.params.HashBlockSize)
+		hashOffset += blocks * uint64(vh.params.HashBlockSize)
 	}
 
 	// Add root level
 	levels = append(levels, hashTreeLevel{
-		offset: offset,
+		offset: hashOffset,
 		size:   1,
 	})
 
@@ -74,14 +83,21 @@ func (vh *VerityHash) calculateHashLevels() ([]hashTreeLevel, error) {
 
 // verifyHashBlock verifies a single hash block
 func (vh *VerityHash) verifyHashBlock(data []byte, salt []byte) ([]byte, error) {
-	h := crypto.SHA256.New() // TODO: Make hash algorithm configurable
+	h := crypto.SHA256.New()
 
-	if vh.params.HashType == 1 { // Normal hash
-		h.Write(salt)
+	// 确保按照正确的顺序添加salt和data
+	if vh.params.HashType == 1 {
+		// 先写入salt，再写入data
+		if len(salt) > 0 {
+			h.Write(salt)
+		}
 		h.Write(data)
-	} else { // Chrome OS hash
+	} else {
+		// 先写入data，再写入salt
 		h.Write(data)
-		h.Write(salt)
+		if len(salt) > 0 {
+			h.Write(salt)
+		}
 	}
 
 	return h.Sum(nil), nil
@@ -111,91 +127,162 @@ func writeBlock(f *os.File, offset uint64, data []byte) error {
 }
 
 func (vh *VerityHash) createOrVerifyHash(verify bool) error {
-	// Open devices
-	dataFile, err := os.OpenFile(vh.dataDevice, os.O_RDONLY, 0)
+	// 打开设备文件
+	dataFile, hashFile, err := vh.openDeviceFiles(verify)
 	if err != nil {
-		return fmt.Errorf("cannot open data device: %v", err)
+		return fmt.Errorf("failed to open device files: %w", err)
 	}
 	defer dataFile.Close()
+	defer hashFile.Close()
+
+	// 计算哈希树层级
+	levels, err := vh.calculateHashLevels()
+	if err != nil {
+		return fmt.Errorf("failed to calculate hash levels: %w", err)
+	}
+
+	if len(levels) > VerityMaxLevels {
+		return fmt.Errorf("hash tree exceeds maximum levels: %d", len(levels))
+	}
+
+	// 创建哈希缓冲区
+	hashBuffers := vh.createHashBuffers(levels)
+
+	// 处理每一层哈希
+	currentHash, err := vh.processHashLevels(levels, hashBuffers, dataFile, hashFile, verify)
+	if err != nil {
+		return err
+	}
+
+	// 验证或保存根哈希
+	return vh.finalizeRootHash(currentHash, verify)
+}
+
+// openDeviceFiles 打开数据和哈希设备文件
+func (vh *VerityHash) openDeviceFiles(verify bool) (*os.File, *os.File, error) {
+	dataFile, err := os.OpenFile(vh.dataDevice, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot open data device: %w", err)
+	}
 
 	flag := os.O_RDONLY
 	if !verify {
 		flag = os.O_RDWR
 	}
+
 	hashFile, err := os.OpenFile(vh.hashDevice, flag, 0)
 	if err != nil {
-		return fmt.Errorf("cannot open hash device: %v", err)
-	}
-	defer hashFile.Close()
-
-	// Calculate hash tree levels
-	levels, err := vh.calculateHashLevels()
-	if err != nil {
-		return err
+		dataFile.Close()
+		return nil, nil, fmt.Errorf("cannot open hash device: %w", err)
 	}
 
-	if len(levels) > VerityMaxLevels {
-		return fmt.Errorf("too many tree levels: %d", len(levels))
-	}
+	return dataFile, hashFile, nil
+}
 
-	// Process each level from bottom up
-	currentHash := make([]byte, len(vh.rootHash))
+// createHashBuffers 为每一层创建哈希缓冲区
+func (vh *VerityHash) createHashBuffers(levels []hashTreeLevel) [][]byte {
+	hashBuffers := make([][]byte, len(levels))
+	for i := range hashBuffers {
+		hashBuffers[i] = make([]byte, levels[i].size*32)
+	}
+	return hashBuffers
+}
+
+// processHashLevels 处理所有哈希层级
+func (vh *VerityHash) processHashLevels(levels []hashTreeLevel, hashBuffers [][]byte,
+	dataFile, hashFile *os.File, verify bool) ([]byte, error) {
+
+	hashPerBlock := vh.params.HashBlockSize / 32
+	currentHash := make([]byte, 32)
+
 	for i := 0; i < len(levels); i++ {
-		level := levels[i]
-
-		// For each block in this level
-		for j := uint64(0); j < level.size; j++ {
-			var blockData []byte
-			var err error
-
-			if i == 0 {
-				// Read from data device for first level
-				blockData, err = readBlock(dataFile, j*uint64(vh.params.DataBlockSize), vh.params.DataBlockSize)
-			} else {
-				// Read from hash device for other levels
-				blockData, err = readBlock(hashFile, levels[i-1].offset+j*uint64(vh.params.HashBlockSize), vh.params.HashBlockSize)
-			}
+		for j := uint64(0); j < levels[i].size; j++ {
+			blockData, err := vh.readBlockData(i, j, hashPerBlock, levels, hashBuffers, dataFile)
 			if err != nil {
-				return fmt.Errorf("failed to read block: %v", err)
+				return nil, err
 			}
 
-			// Calculate hash
 			hash, err := vh.verifyHashBlock(blockData, vh.params.Salt)
 			if err != nil {
-				return fmt.Errorf("failed to calculate hash: %v", err)
+				return nil, fmt.Errorf("failed to calculate hash at level %d block %d: %w", i, j, err)
 			}
 
-			if verify {
-				// Read stored hash
-				storedHash, err := readBlock(hashFile, level.offset+j*uint64(len(vh.rootHash)), uint32(len(vh.rootHash)))
-				if err != nil {
-					return fmt.Errorf("failed to read stored hash: %v", err)
-				}
-
-				// Compare hashes
-				if !bytes.Equal(hash, storedHash) {
-					return fmt.Errorf("hash mismatch at level %d block %d", i, j)
-				}
-			} else {
-				// Write hash
-				if err := writeBlock(hashFile, level.offset+j*uint64(len(vh.rootHash)), hash); err != nil {
-					return fmt.Errorf("failed to write hash: %v", err)
-				}
+			if err := vh.handleHashResult(i, j, hash, hashBuffers, hashFile, levels, verify); err != nil {
+				return nil, err
 			}
 
-			// Save hash for next level
 			copy(currentHash, hash)
 		}
+
+		// 写入哈希文件
+		if !verify && i == 0 {
+			// 注意：写入时不需要加上HashAreaOffset，因为levels[i].offset已经包含了这个偏移
+			if err := writeBlock(hashFile, levels[i].offset, hashBuffers[i]); err != nil {
+				return nil, fmt.Errorf("failed to write hash level: %w", err)
+			}
+		}
 	}
 
-	// Verify/save root hash
+	return currentHash, nil
+}
+
+// readBlockData 读取指定层级和块的数据
+func (vh *VerityHash) readBlockData(level int, blockNum uint64, hashPerBlock uint32,
+	levels []hashTreeLevel, hashBuffers [][]byte, dataFile *os.File) ([]byte, error) {
+
+	if level == 0 {
+		return readBlock(dataFile, blockNum*uint64(vh.params.DataBlockSize), vh.params.DataBlockSize)
+	}
+
+	blockStart := blockNum * uint64(hashPerBlock)
+	blockEnd := blockStart + uint64(hashPerBlock)
+	if blockEnd > levels[level-1].size {
+		blockEnd = levels[level-1].size
+	}
+
+	blockData := make([]byte, vh.params.HashBlockSize)
+	copy(blockData, hashBuffers[level-1][blockStart*32:blockEnd*32])
+	return blockData, nil
+}
+
+// handleHashResult 处理哈希计算结果
+func (vh *VerityHash) handleHashResult(level int, blockNum uint64, hash []byte,
+	hashBuffers [][]byte, hashFile *os.File, levels []hashTreeLevel, verify bool) error {
+
+	if verify {
+		if level == 0 {
+			// 对于level 0，需要与hash file中存储的哈希比较
+			// 注意：读取时不需要重复加上HashAreaOffset，因为levels[level].offset已经包含了这个偏移
+			offset := levels[level].offset + blockNum*32
+
+			storedHash, err := readBlock(hashFile, offset, 32)
+			if err != nil {
+				return fmt.Errorf("failed to read stored hash at level %d block %d: %w", level, blockNum, err)
+			}
+
+			if !bytes.Equal(hash, storedHash) {
+				return fmt.Errorf("hash mismatch at level %d block %d", level, blockNum)
+			}
+		}
+	}
+
+	// 保存哈希到缓冲区
+	copy(hashBuffers[level][blockNum*32:], hash)
+
+	return nil
+}
+
+// finalizeRootHash 验证或保存根哈希
+func (vh *VerityHash) finalizeRootHash(currentHash []byte, verify bool) error {
+	log.Printf("currentHash: %x", currentHash)
+	log.Printf("rootHash: %x", vh.rootHash)
 	if verify {
 		if !bytes.Equal(currentHash, vh.rootHash) {
-			return fmt.Errorf("root hash mismatch")
+			return fmt.Errorf("root hash verification failed")
 		}
-	} else {
-		copy(vh.rootHash, currentHash)
+		return nil
 	}
 
+	copy(vh.rootHash, currentHash)
 	return nil
 }

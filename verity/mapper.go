@@ -9,14 +9,15 @@ import (
 
 const (
 	// Device mapper ioctls
-	DM_IOCTL          = 0xfd
-	DM_VERSION_CMD    = 0x00
-	DM_TABLE_LOAD_CMD = 0x02
-	DM_DEV_CREATE_CMD = 0x03
-	DM_DEV_REMOVE_CMD = 0x04
-	DM_DEV_STATUS_CMD = 0x07
-	DM_DEV_WAIT_CMD   = 0x08
-	DM_TARGET_MSG_CMD = 0x0C
+	DM_IOCTL           = 0xfd
+	DM_VERSION_CMD     = 0x00
+	DM_TABLE_LOAD_CMD  = 0x02
+	DM_DEV_CREATE_CMD  = 0x03
+	DM_DEV_REMOVE_CMD  = 0x04
+	DM_DEV_SUSPEND_CMD = 0x05
+	DM_DEV_STATUS_CMD  = 0x07
+	DM_DEV_WAIT_CMD    = 0x08
+	DM_TARGET_MSG_CMD  = 0x0C
 
 	// Device mapper flags
 	DM_READONLY_FLAG       = 1 << 0
@@ -41,6 +42,7 @@ const (
 
 	// Device mapper ioctl data sizes
 	DM_VERSION_SIZE = 16
+	DM_STRUCT_SIZE  = 312 // Size of dm_ioctl struct in kernel
 )
 
 // DMDevice represents a device mapper device
@@ -84,7 +86,7 @@ type dmIoctlData struct {
 	EventNr     uint32
 	Name        [DM_NAME_LEN]byte
 	UUID        [DM_UUID_LEN]byte
-	DevNo       [2]uint32 // Major and minor device numbers
+	DevNo       uint64 // Device number
 }
 
 // dmTargetSpec represents a device mapper target specification
@@ -105,8 +107,33 @@ func dmIoctl(cmd uint32, data unsafe.Pointer) error {
 	}
 	defer fd.Close()
 
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd.Fd(), uintptr(cmd), uintptr(data))
+	// Get the header
+	header := (*dmIoctlData)(data)
+
+	// Debug info
+	fmt.Printf("DM ioctl command: 0x%x\n", cmd)
+	fmt.Printf("DM ioctl header:\n")
+	fmt.Printf("  Version: %d.%d.%d\n", header.Version[0], header.Version[1], header.Version[2])
+	fmt.Printf("  DataSize: %d\n", header.DataSize)
+	fmt.Printf("  DataStart: %d\n", header.DataStart)
+	fmt.Printf("  TargetCount: %d\n", header.TargetCount)
+	fmt.Printf("  Flags: 0x%x\n", header.Flags)
+	fmt.Printf("  Name: %q\n", string(header.Name[:]))
+	fmt.Printf("  UUID: %q\n", string(header.UUID[:]))
+	fmt.Printf("  DevNo: %d\n", header.DevNo)
+
+	_, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		fd.Fd(),
+		uintptr(cmd),
+		uintptr(data),
+	)
+
 	if errno != 0 {
+		fmt.Printf("DM ioctl failed with errno: %d (%v)\n", errno, errno)
+		if errno == syscall.EEXIST && (header.Flags&DM_EXISTS_FLAG) != 0 {
+			return nil
+		}
 		return errno
 	}
 	return nil
@@ -114,10 +141,29 @@ func dmIoctl(cmd uint32, data unsafe.Pointer) error {
 
 // CreateVerityDevice creates a new verity device
 func CreateVerityDevice(name string, params *VerityParams, dataDevice string, hashDevice string, rootHash []byte) error {
+	// Validate device name
+	if name == "" {
+		return fmt.Errorf("device name cannot be empty")
+	}
+
+	// Validate device name characters
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return fmt.Errorf("invalid character in device name: %c", c)
+		}
+	}
+
 	// Create device mapper device
 	dev := &DMDevice{
 		Name:  name,
 		Flags: DM_READONLY_FLAG,
+		UUID:  fmt.Sprintf("CRYPT-VERITY-%x", rootHash[:8]),
+	}
+
+	// First suspend the device
+	dev.Flags |= DM_SUSPEND_FLAG
+	if err := suspendDevice(dev); err != nil {
+		return fmt.Errorf("failed to suspend device: %v", err)
 	}
 
 	// Create verity target
@@ -155,7 +201,7 @@ func CreateVerityDevice(name string, params *VerityParams, dataDevice string, ha
 		Params: targetParams,
 	}
 
-	// Create device
+	// Create device in suspended state
 	if err := createDevice(dev); err != nil {
 		return fmt.Errorf("failed to create device: %v", err)
 	}
@@ -164,6 +210,13 @@ func CreateVerityDevice(name string, params *VerityParams, dataDevice string, ha
 	if err := loadTable(dev, []*DMTarget{dmTarget}); err != nil {
 		removeDevice(dev)
 		return fmt.Errorf("failed to load table: %v", err)
+	}
+
+	// Resume device after loading table
+	dev.Flags = DM_READONLY_FLAG // Reset flags
+	if err := resumeDevice(dev); err != nil {
+		removeDevice(dev)
+		return fmt.Errorf("failed to resume device: %v", err)
 	}
 
 	return nil
@@ -179,8 +232,9 @@ func RemoveVerityDevice(name string) error {
 
 // createDevice creates a new device mapper device
 func createDevice(dev *DMDevice) error {
-	// Calculate required size for ioctl data
-	size := unsafe.Sizeof(dmIoctlData{})
+	// Use fixed size from kernel
+	size := uintptr(DM_STRUCT_SIZE)
+
 	data := make([]byte, size)
 	header := (*dmIoctlData)(unsafe.Pointer(&data[0]))
 
@@ -188,32 +242,57 @@ func createDevice(dev *DMDevice) error {
 	header.Version[0] = DM_VERSION_MAJOR
 	header.Version[1] = DM_VERSION_MINOR
 	header.Version[2] = DM_VERSION_PATCH
-	header.DataSize = uint32(size)
+	header.DataSize = DM_STRUCT_SIZE
 	header.DataStart = uint32(size)
 	header.Flags = dev.Flags
 
 	// Copy device name
-	copy(header.Name[:], dev.Name)
+	nameBytes := []byte(dev.Name)
+	if len(nameBytes) > DM_NAME_LEN-1 {
+		return fmt.Errorf("device name too long")
+	}
+	// Clear arrays first
+	for i := range header.Name {
+		header.Name[i] = 0
+	}
+	for i := range header.UUID {
+		header.UUID[i] = 0
+	}
+
+	// Copy name with explicit null termination
+	if len(nameBytes) > 0 {
+		copy(header.Name[:], nameBytes)
+		header.Name[len(nameBytes)] = 0
+	}
+
 	if dev.UUID != "" {
-		copy(header.UUID[:], dev.UUID)
+		uuidBytes := []byte(dev.UUID)
+		if len(uuidBytes) > DM_UUID_LEN-1 {
+			return fmt.Errorf("UUID too long")
+		}
+		// Copy UUID with explicit null termination
+		copy(header.UUID[:], uuidBytes)
+		header.UUID[len(uuidBytes)] = 0
 	}
 
 	// Create device
 	cmd := ((DM_IOCTL << 0x8) | DM_DEV_CREATE_CMD)
+	fmt.Printf("Creating device with name: %q\n", dev.Name)
 	if err := dmIoctl(uint32(cmd), unsafe.Pointer(&data[0])); err != nil {
 		return fmt.Errorf("device mapper ioctl failed: %v", err)
 	}
 
 	// Get device number
-	dev.DevNo = uint64(header.DevNo[0])<<32 | uint64(header.DevNo[1])
+	dev.DevNo = header.DevNo
 
 	return nil
 }
 
 // removeDevice removes a device mapper device
 func removeDevice(dev *DMDevice) error {
-	// Calculate required size for ioctl data
-	size := unsafe.Sizeof(dmIoctlData{})
+	// Use fixed size from kernel
+	size := uintptr(DM_STRUCT_SIZE)
+
 	data := make([]byte, size)
 	header := (*dmIoctlData)(unsafe.Pointer(&data[0]))
 
@@ -221,12 +300,17 @@ func removeDevice(dev *DMDevice) error {
 	header.Version[0] = DM_VERSION_MAJOR
 	header.Version[1] = DM_VERSION_MINOR
 	header.Version[2] = DM_VERSION_PATCH
-	header.DataSize = uint32(size)
+	header.DataSize = DM_STRUCT_SIZE
 	header.DataStart = uint32(size)
 	header.Flags = dev.Flags
 
 	// Copy device name
-	copy(header.Name[:], dev.Name)
+	nameBytes := []byte(dev.Name)
+	if len(nameBytes) > DM_NAME_LEN-1 {
+		return fmt.Errorf("device name too long")
+	}
+	copy(header.Name[:len(nameBytes)], nameBytes)
+	header.Name[len(nameBytes)] = 0
 
 	// Remove device
 	cmd := ((DM_IOCTL << 0x8) | DM_DEV_REMOVE_CMD)
@@ -240,34 +324,62 @@ func removeDevice(dev *DMDevice) error {
 // loadTable loads the device mapper table
 func loadTable(dev *DMDevice, targets []*DMTarget) error {
 	// Calculate total size needed for ioctl data
-	size := unsafe.Sizeof(dmIoctlData{})
+	baseSize := uintptr(DM_STRUCT_SIZE)
 	for _, target := range targets {
-		size += unsafe.Sizeof(dmTargetSpec{})
-		size += uintptr(len(target.Params) + 1) // +1 for null terminator
+		baseSize += unsafe.Sizeof(dmTargetSpec{})
+		baseSize += uintptr(len(target.Params) + 1) // +1 for null terminator
 	}
 
 	// Allocate memory
-	data := make([]byte, size)
+	data := make([]byte, baseSize)
 	header := (*dmIoctlData)(unsafe.Pointer(&data[0]))
 
 	// Fill header
 	header.Version[0] = DM_VERSION_MAJOR
 	header.Version[1] = DM_VERSION_MINOR
 	header.Version[2] = DM_VERSION_PATCH
-	header.DataSize = uint32(size)
-	header.DataStart = uint32(unsafe.Sizeof(dmIoctlData{}))
+	header.DataSize = uint32(baseSize)
+	header.DataStart = uint32(DM_STRUCT_SIZE)
 	header.TargetCount = uint32(len(targets))
 	header.Flags = dev.Flags
 
 	// Copy device name
-	copy(header.Name[:], dev.Name)
+	nameBytes := []byte(dev.Name)
+	if len(nameBytes) > DM_NAME_LEN-1 {
+		return fmt.Errorf("device name too long")
+	}
+	// Clear arrays first
+	for i := range header.Name {
+		header.Name[i] = 0
+	}
+	for i := range header.UUID {
+		header.UUID[i] = 0
+	}
+
+	// Copy name with null termination
+	copy(header.Name[:], nameBytes)
+	header.Name[len(nameBytes)] = 0
+
+	// Copy UUID if present
+	if dev.UUID != "" {
+		uuidBytes := []byte(dev.UUID)
+		if len(uuidBytes) > DM_UUID_LEN-1 {
+			return fmt.Errorf("UUID too long")
+		}
+		copy(header.UUID[:], uuidBytes)
+		header.UUID[len(uuidBytes)] = 0
+	}
 
 	// Fill target specifications
-	offset := unsafe.Sizeof(dmIoctlData{})
+	offset := uintptr(DM_STRUCT_SIZE)
 	for _, target := range targets {
 		spec := (*dmTargetSpec)(unsafe.Pointer(&data[offset]))
 		spec.SectorStart = target.Start
 		spec.Length = target.Length
+		// Clear target type array
+		for i := range spec.TargetType {
+			spec.TargetType[i] = 0
+		}
 		copy(spec.TargetType[:], target.Type)
 
 		// Copy target parameters
@@ -280,6 +392,70 @@ func loadTable(dev *DMDevice, targets []*DMTarget) error {
 
 	// Load table
 	cmd := ((DM_IOCTL << 0x8) | DM_TABLE_LOAD_CMD)
+	if err := dmIoctl(uint32(cmd), unsafe.Pointer(&data[0])); err != nil {
+		return fmt.Errorf("device mapper ioctl failed: %v", err)
+	}
+
+	return nil
+}
+
+func suspendDevice(dev *DMDevice) error {
+	// Use fixed size from kernel
+	size := uintptr(DM_STRUCT_SIZE)
+
+	data := make([]byte, size)
+	header := (*dmIoctlData)(unsafe.Pointer(&data[0]))
+
+	// Fill header
+	header.Version[0] = DM_VERSION_MAJOR
+	header.Version[1] = DM_VERSION_MINOR
+	header.Version[2] = DM_VERSION_PATCH
+	header.DataSize = DM_STRUCT_SIZE
+	header.DataStart = uint32(size)
+	header.Flags = dev.Flags | DM_SUSPEND_FLAG
+
+	// Copy device name
+	nameBytes := []byte(dev.Name)
+	if len(nameBytes) > DM_NAME_LEN-1 {
+		return fmt.Errorf("device name too long")
+	}
+	copy(header.Name[:len(nameBytes)], nameBytes)
+	header.Name[len(nameBytes)] = 0
+
+	// Suspend device
+	cmd := ((DM_IOCTL << 0x8) | DM_DEV_SUSPEND_CMD)
+	if err := dmIoctl(uint32(cmd), unsafe.Pointer(&data[0])); err != nil {
+		return fmt.Errorf("device mapper ioctl failed: %v", err)
+	}
+
+	return nil
+}
+
+func resumeDevice(dev *DMDevice) error {
+	// Use fixed size from kernel
+	size := uintptr(DM_STRUCT_SIZE)
+
+	data := make([]byte, size)
+	header := (*dmIoctlData)(unsafe.Pointer(&data[0]))
+
+	// Fill header
+	header.Version[0] = DM_VERSION_MAJOR
+	header.Version[1] = DM_VERSION_MINOR
+	header.Version[2] = DM_VERSION_PATCH
+	header.DataSize = DM_STRUCT_SIZE
+	header.DataStart = uint32(size)
+	header.Flags = dev.Flags &^ DM_SUSPEND_FLAG
+
+	// Copy device name
+	nameBytes := []byte(dev.Name)
+	if len(nameBytes) > DM_NAME_LEN-1 {
+		return fmt.Errorf("device name too long")
+	}
+	copy(header.Name[:len(nameBytes)], nameBytes)
+	header.Name[len(nameBytes)] = 0
+
+	// Resume device
+	cmd := ((DM_IOCTL << 0x8) | DM_DEV_SUSPEND_CMD)
 	if err := dmIoctl(uint32(cmd), unsafe.Pointer(&data[0])); err != nil {
 		return fmt.Errorf("device mapper ioctl failed: %v", err)
 	}
