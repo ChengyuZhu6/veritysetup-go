@@ -3,6 +3,9 @@ package verity
 import (
 	"bytes"
 	"crypto"
+	_ "crypto/sha1"   // Import SHA1
+	_ "crypto/sha256" // Import SHA256
+	_ "crypto/sha512" // Import SHA512
 	"fmt"
 	"io"
 	"os"
@@ -14,15 +17,36 @@ type VerityHash struct {
 	dataDevice string
 	hashDevice string
 	rootHash   []byte
+	hashFunc   crypto.Hash
 }
 
 // NewVerityHash creates a new VerityHash instance
 func NewVerityHash(params *VerityParams, dataDevice, hashDevice string, rootHash []byte) *VerityHash {
+	var hashFunc crypto.Hash
+	switch params.HashName {
+	case "sha256":
+		hashFunc = crypto.SHA256
+	case "sha512":
+		hashFunc = crypto.SHA512
+	case "sha1":
+		hashFunc = crypto.SHA1
+	default:
+		hashFunc = crypto.SHA256
+	}
+
+	// Ensure hash function is available
+	if !hashFunc.Available() {
+		// Fallback to SHA256 if hash function is not available
+		hashFunc = crypto.SHA256
+	}
+
+	hashSize := hashFunc.Size()
 	vh := &VerityHash{
 		params:     params,
 		dataDevice: dataDevice,
 		hashDevice: hashDevice,
-		rootHash:   make([]byte, 32),
+		rootHash:   make([]byte, hashSize),
+		hashFunc:   hashFunc,
 	}
 	if rootHash != nil {
 		copy(vh.rootHash, rootHash)
@@ -48,7 +72,12 @@ type hashTreeLevel struct {
 
 // calculateHashLevels calculates the offsets and sizes for each level of the hash tree
 func (vh *VerityHash) calculateHashLevels() ([]hashTreeLevel, error) {
-	hashPerBlock := vh.params.HashBlockSize / 32 // SHA256 hash size is 32 bytes
+	hashSize := vh.hashFunc.Size()
+	hashPerBlock := vh.params.HashBlockSize / uint32(hashSize)
+	if hashPerBlock == 0 {
+		return nil, fmt.Errorf("hash block size %d is too small for hash size %d",
+			vh.params.HashBlockSize, hashSize)
+	}
 	levels := make([]hashTreeLevel, 0)
 
 	blocks := vh.params.DataSize
@@ -81,7 +110,7 @@ func (vh *VerityHash) calculateHashLevels() ([]hashTreeLevel, error) {
 
 // verifyHashBlock verifies a single hash block
 func (vh *VerityHash) verifyHashBlock(data []byte, salt []byte) ([]byte, error) {
-	h := crypto.SHA256.New()
+	h := vh.hashFunc.New()
 
 	if vh.params.HashType == 1 {
 		// Write salt first, then data
@@ -178,9 +207,10 @@ func (vh *VerityHash) openDeviceFiles(verify bool) (*os.File, *os.File, error) {
 
 // createHashBuffers creates hash buffers for each level
 func (vh *VerityHash) createHashBuffers(levels []hashTreeLevel) [][]byte {
+	hashSize := vh.hashFunc.Size()
 	hashBuffers := make([][]byte, len(levels))
 	for i := range hashBuffers {
-		hashBuffers[i] = make([]byte, levels[i].size*32)
+		hashBuffers[i] = make([]byte, levels[i].size*uint64(hashSize))
 	}
 	return hashBuffers
 }
@@ -189,12 +219,12 @@ func (vh *VerityHash) createHashBuffers(levels []hashTreeLevel) [][]byte {
 func (vh *VerityHash) processHashLevels(levels []hashTreeLevel, hashBuffers [][]byte,
 	dataFile, hashFile *os.File, verify bool) ([]byte, error) {
 
-	hashPerBlock := vh.params.HashBlockSize / 32
-	currentHash := make([]byte, 32)
+	hashSize := uint32(vh.hashFunc.Size())
+	currentHash := make([]byte, hashSize)
 
 	for i := 0; i < len(levels); i++ {
 		for j := uint64(0); j < levels[i].size; j++ {
-			blockData, err := vh.readBlockData(i, j, hashPerBlock, levels, hashBuffers, dataFile)
+			blockData, err := vh.readBlockData(i, j, hashSize, levels, hashBuffers, dataFile)
 			if err != nil {
 				return nil, err
 			}
@@ -223,21 +253,22 @@ func (vh *VerityHash) processHashLevels(levels []hashTreeLevel, hashBuffers [][]
 }
 
 // readBlockData reads data for specified level and block
-func (vh *VerityHash) readBlockData(level int, blockNum uint64, hashPerBlock uint32,
+func (vh *VerityHash) readBlockData(level int, blockNum uint64, hashSize uint32,
 	levels []hashTreeLevel, hashBuffers [][]byte, dataFile *os.File) ([]byte, error) {
 
 	if level == 0 {
 		return readBlock(dataFile, blockNum*uint64(vh.params.DataBlockSize), vh.params.DataBlockSize)
 	}
 
-	blockStart := blockNum * uint64(hashPerBlock)
-	blockEnd := blockStart + uint64(hashPerBlock)
-	if blockEnd > levels[level-1].size {
-		blockEnd = levels[level-1].size
+	hashPerBlock := vh.params.HashBlockSize / uint32(hashSize)
+	blockStart := blockNum * uint64(hashPerBlock) * uint64(hashSize)
+	blockEnd := blockStart + uint64(hashPerBlock*hashSize)
+	if blockEnd > uint64(len(hashBuffers[level-1])) {
+		blockEnd = uint64(len(hashBuffers[level-1]))
 	}
 
 	blockData := make([]byte, vh.params.HashBlockSize)
-	copy(blockData, hashBuffers[level-1][blockStart*32:blockEnd*32])
+	copy(blockData, hashBuffers[level-1][blockStart:blockEnd])
 	return blockData, nil
 }
 
@@ -247,9 +278,9 @@ func (vh *VerityHash) handleHashResult(level int, blockNum uint64, hash []byte,
 
 	if verify {
 		if level == 0 {
-			offset := levels[level].offset + blockNum*32
+			offset := levels[level].offset + blockNum*uint64(vh.hashFunc.Size())
 
-			storedHash, err := readBlock(hashFile, offset, 32)
+			storedHash, err := readBlock(hashFile, offset, uint32(vh.hashFunc.Size()))
 			if err != nil {
 				return fmt.Errorf("failed to read stored hash at level %d block %d: %w", level, blockNum, err)
 			}
@@ -261,7 +292,7 @@ func (vh *VerityHash) handleHashResult(level int, blockNum uint64, hash []byte,
 	}
 
 	// Save hash to buffer
-	copy(hashBuffers[level][blockNum*32:], hash)
+	copy(hashBuffers[level][blockNum*uint64(vh.hashFunc.Size()):], hash)
 
 	return nil
 }
