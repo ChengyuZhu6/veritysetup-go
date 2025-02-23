@@ -1,37 +1,48 @@
 package verity
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"testing"
 )
 
-// setupTestData prepares test data
+// setupTestData creates test data and hash files
 func setupTestData(t *testing.T, dataPath, hashPath string, dataSize uint64) {
 	t.Helper()
 
-	data := make([]byte, dataSize)
-	if _, err := rand.Read(data); err != nil {
+	// Generate random test data
+	if err := generateRandomFile(dataPath, dataSize); err != nil {
 		t.Fatalf("Failed to generate test data: %v", err)
 	}
-	if err := os.WriteFile(dataPath, data, 0644); err != nil {
-		t.Fatalf("Failed to write test data: %v", err)
-	}
 
-	// Use the same block size as in the test parameters
+	// Create empty hash file
 	hashSize := calculateHashDeviceSize(dataSize, 4096, 32)
-	hashData := make([]byte, hashSize)
-	if err := os.WriteFile(hashPath, hashData, 0644); err != nil {
+	if err := createEmptyFile(hashPath, hashSize); err != nil {
 		t.Fatalf("Failed to create hash file: %v", err)
 	}
 }
 
-// setupVerityTestParams creates test parameters
+// generateRandomFile creates a file with random content
+func generateRandomFile(path string, size uint64) error {
+	data := make([]byte, size)
+	if _, err := rand.Read(data); err != nil {
+		return fmt.Errorf("failed to generate random data: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// createEmptyFile creates an empty file of specified size
+func createEmptyFile(path string, size uint64) error {
+	data := make([]byte, size)
+	return os.WriteFile(path, data, 0644)
+}
+
+// setupVerityTestParams creates default test parameters
 func setupVerityTestParams(dataSize uint64) *VerityParams {
 	return &VerityParams{
 		HashName:       "sha256",
@@ -39,68 +50,115 @@ func setupVerityTestParams(dataSize uint64) *VerityParams {
 		HashBlockSize:  4096,
 		DataSize:       dataSize / 4096,
 		HashType:       1,
-		Salt:           make([]byte, 32), // Use 32-byte empty salt to match veritysetup default
+		Salt:           make([]byte, 32),
 		SaltSize:       32,
-		HashAreaOffset: 4096, // Start after first block
+		HashAreaOffset: 4096,
 	}
 }
 
-// calculateHashDeviceSize calculates the hash device size
+// calculateHashDeviceSize calculates the required hash device size
 func calculateHashDeviceSize(dataSize uint64, blockSize uint32, hashSize uint32) uint64 {
-	blocks := dataSize / uint64(blockSize)
-	if dataSize%uint64(blockSize) != 0 {
-		blocks++
-	}
-
-	totalBlocks := uint64(0)
-	remainingBlocks := blocks
-	hashPerBlock := blockSize / hashSize
-
-	for remainingBlocks > 1 {
-		remainingBlocks = (remainingBlocks + uint64(hashPerBlock) - 1) / uint64(hashPerBlock)
-		totalBlocks += remainingBlocks
-	}
-
-	return totalBlocks * uint64(blockSize)
+	blocks := (dataSize + uint64(blockSize) - 1) / uint64(blockSize)
+	hashBlocks := (blocks + uint64(blockSize/hashSize) - 1) / uint64(blockSize/hashSize)
+	return hashBlocks * uint64(blockSize)
 }
 
 // getVeritySetupRootHash gets the root hash from veritysetup
-func getVeritySetupRootHash(t *testing.T, dataPath string, hashPath string, params *VerityParams) ([]byte, error) {
+func getVeritySetupRootHash(dataPath string, hashPath string, params *VerityParams) ([]byte, error) {
 	// Construct veritysetup command
 	cmd := exec.Command("veritysetup", "format", "--no-superblock",
 		dataPath, hashPath+".verity",
-		"--hash="+params.HashName,
-		"--data-block-size="+strconv.Itoa(int(params.DataBlockSize)),
-		"--hash-block-size="+strconv.Itoa(int(params.HashBlockSize)),
-		"--salt="+hex.EncodeToString(params.Salt),
-	)
+		"--hash", params.HashName,
+		"--data-block-size", strconv.FormatUint(uint64(params.DataBlockSize), 10),
+		"--hash-block-size", strconv.FormatUint(uint64(params.HashBlockSize), 10),
+		"--salt", hex.EncodeToString(params.Salt))
 
-	// Execute and parse output
-	output, err := cmd.CombinedOutput()
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("veritysetup failed: %v\nOutput: %s", err, output)
+		return nil, fmt.Errorf("veritysetup failed: %w", err)
 	}
 
-	// Extract root hash from output
-	re := regexp.MustCompile(`Root hash:\s+([0-9a-fA-F]+)`)
-	matches := re.FindStringSubmatch(string(output))
-	if len(matches) < 2 {
-		return nil, fmt.Errorf("failed to parse root hash from output")
+	// Parse root hash from output
+	for _, line := range bytes.Split(output, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("Root hash:")) {
+			hexHash := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("Root hash:")))
+			rootHash := make([]byte, hex.DecodedLen(len(hexHash)))
+			if _, err := hex.Decode(rootHash, hexHash); err != nil {
+				return nil, fmt.Errorf("failed to decode root hash: %w", err)
+			}
+			return rootHash, nil
+		}
 	}
 
-	rootHash, err := hex.DecodeString(matches[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid root hash format: %v", err)
-	}
-
-	return rootHash, nil
+	return nil, fmt.Errorf("root hash not found in veritysetup output")
 }
 
-// readFileContent reads the entire content of a file
+// readFileContent reads entire file content
 func readFileContent(path string) ([]byte, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file %s: %w", path, err)
+		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 	return content, nil
+}
+
+// compareVerityImplementations compares our implementation with veritysetup
+func compareVerityImplementations(t *testing.T, params *VerityParams, dataPath, hashPath string) error {
+	// Prepare test data
+	setupTestData(t, dataPath, hashPath, params.DataSize*uint64(params.DataBlockSize))
+
+	// Use our implementation to generate hash
+	ourVh := NewVerityHash(params, dataPath, hashPath, nil)
+	if err := ourVh.Create(); err != nil {
+		return fmt.Errorf("our implementation create failed: %w", err)
+	}
+
+	// Save our hash file content
+	ourHashContent, err := readFileContent(hashPath)
+	if err != nil {
+		return fmt.Errorf("failed to read our hash file: %w", err)
+	}
+
+	// Use veritysetup to generate hash
+	veritysetupHashPath := hashPath + ".verity"
+	veritysetupRootHash, err := getVeritySetupRootHash(dataPath, hashPath, params)
+	if err != nil {
+		return fmt.Errorf("veritysetup failed: %w", err)
+	}
+
+	// Read veritysetup hash file content
+	veritysetupHashContent, err := readFileContent(veritysetupHashPath)
+	if err != nil {
+		return fmt.Errorf("failed to read veritysetup hash file: %w", err)
+	}
+
+	// Compare root hash
+	if !bytes.Equal(ourVh.rootHash, veritysetupRootHash) {
+		return fmt.Errorf("root hash mismatch\nOur: %x\nVeritysetup: %x",
+			ourVh.rootHash, veritysetupRootHash)
+	}
+
+	// Compare hash file content
+	// Note: We only compare content from HashAreaOffset because veritysetup might have extra metadata at the beginning
+	ourHashData := ourHashContent[params.HashAreaOffset:]
+	veritysetupHashData := veritysetupHashContent[params.HashAreaOffset:]
+
+	if !bytes.Equal(ourHashData, veritysetupHashData) {
+		return fmt.Errorf("hash file content mismatch from offset %d\nOur hash len: %d\nVeritysetup hash len: %d",
+			params.HashAreaOffset, len(ourHashData), len(veritysetupHashData))
+	}
+
+	return nil
+}
+
+// corruptFile corrupts a file at specific offset
+func corruptFile(path string, offset int64) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	_, err = f.WriteAt([]byte{0xFF}, offset)
+	return err
 }

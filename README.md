@@ -12,14 +12,16 @@ The main motivation is to eliminate the system dependency on veritysetup when Go
 
 Currently implemented:
 - Hash tree creation and verification
-- Support for SHA256 hash algorithm
+- Support for multiple hash algorithms (SHA1, SHA256, SHA512)
 - Compatible with Linux kernel's dm-verity format
 - Support for multiple hash tree levels
 - Data corruption detection
+- Configurable block sizes
+- Flexible salt configurations
 
 ## Installation
 
-```
+```bash
 go get github.com/ChengyuZhu6/veritysetup-go
 ```
 
@@ -29,9 +31,9 @@ This library can be used as a drop-in replacement for veritysetup in Go projects
 
 ### Creating a Hash Tree
 
-```
+```go
 params := &verity.VerityParams{
-    HashName:       "sha256",
+    HashName:       "sha256", // Supports "sha1", "sha256", "sha512"
     DataBlockSize:  4096,
     HashBlockSize:  4096,
     DataSize:       fileSize / 4096, // number of blocks
@@ -51,7 +53,7 @@ if err := vh.Create(); err != nil {
 
 ### Verifying Data
 
-```
+```go
 vh := verity.NewVerityHash(params, dataPath, hashPath, rootHash)
 if err := vh.Verify(); err != nil {
     log.Fatalf("Verification failed: %v", err)
@@ -69,26 +71,28 @@ This is an initial implementation focusing on core functionality. The API may ch
    - Drop-in replacement for all veritysetup commands
 
 2. Additional Hash Algorithms
-   - Support for SHA512
    - Support for Blake2b
+   - Support for other cryptographic hash functions
    - Pluggable hash algorithm interface
 
 3. Performance Optimizations
    - Parallel hash computation
    - Memory usage optimizations
    - Streaming support for large files
+   - Buffer pooling for better memory efficiency
 
 4. Additional Features
    - FEC (Forward Error Correction) support
-   - Support for different salt configurations
    - Integration with Linux device-mapper
    - Support for all veritysetup options and configurations
+   - Automatic block size optimization
 
-5. Documentation
+5. Documentation and Tools
    - Detailed API documentation
-   - Usage examples
+   - More usage examples
    - Performance benchmarks
-   - Migration guide from veritysetup to this library
+   - Migration guide from veritysetup
+   - Debugging and analysis tools
 
 ## Contributing
 
