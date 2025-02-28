@@ -52,7 +52,7 @@ func setupVerityTestParams(dataSize uint64) *VerityParams {
 		HashType:       1,
 		Salt:           make([]byte, 32),
 		SaltSize:       32,
-		HashAreaOffset: 4096,
+		HashAreaOffset: 8192, // first block is the superblock data, second block is the fec data.
 	}
 }
 
@@ -66,7 +66,7 @@ func calculateHashDeviceSize(dataSize uint64, blockSize uint32, hashSize uint32)
 // getVeritySetupRootHash gets the root hash from veritysetup
 func getVeritySetupRootHash(dataPath string, hashPath string, params *VerityParams) ([]byte, error) {
 	// Construct veritysetup command
-	cmd := exec.Command("veritysetup", "format", "--no-superblock",
+	cmd := exec.Command("veritysetup", "format",
 		dataPath, hashPath+".verity",
 		"--hash", params.HashName,
 		"--data-block-size", strconv.FormatUint(uint64(params.DataBlockSize), 10),

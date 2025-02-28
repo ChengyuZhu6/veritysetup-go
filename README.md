@@ -40,7 +40,7 @@ params := &verity.VerityParams{
     HashType:       1,
     Salt:           make([]byte, 32),
     SaltSize:       32,
-    HashAreaOffset: 4096,
+    HashAreaOffset: 8192, // first block is the superblock data, second block is the fec data.
 }
 
 vh := verity.NewVerityHash(params, dataPath, hashPath, nil)
