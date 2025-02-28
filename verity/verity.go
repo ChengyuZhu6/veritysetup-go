@@ -1,9 +1,11 @@
 package verity
 
 const (
-	VeritySignature   = "verity\x00\x00"
-	VerityMaxHashType = 1
-	VerityMaxLevels   = 63
+	VeritySignature      = "verity\x00\x00"
+	VeritySuperblockSize = 512
+	VerityMaxHashType    = 1
+	VerityMaxLevels      = 63
+	MaxSaltSize          = 256
 )
 
 // VeritySuperblock represents the on-disk superblock format
