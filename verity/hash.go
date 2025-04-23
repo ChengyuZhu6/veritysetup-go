@@ -64,6 +64,25 @@ func (vh *VerityHash) Create() error {
 	return vh.createOrVerifyHash(false)
 }
 
+func (vh *VerityHash) GetRootHash() []byte {
+	return vh.rootHash
+}
+
+func (vh *VerityHash) GetHashFunc() crypto.Hash {
+	return vh.hashFunc
+}
+func (vh *VerityHash) GetParams() *VerityParams {
+	return vh.params
+}
+
+func (vh *VerityHash) GetDataDevice() string {
+	return vh.dataDevice
+}
+
+func (vh *VerityHash) GetHashDevice() string {
+	return vh.hashDevice
+}
+
 // hashTreeLevel represents a level in the hash tree
 type hashTreeLevel struct {
 	offset uint64
