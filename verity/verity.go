@@ -24,6 +24,18 @@ type VeritySuperblock struct {
 	Pad2          [168]byte `binary:"big"`
 }
 
+// DefaultDmverityOptions returns a DmverityOptions struct with default values
+func DefaultVeritySuperblock() VeritySuperblock {
+	return VeritySuperblock{
+		Signature:     [8]byte{0x76, 0x65, 0x72, 0x69, 0x74, 0x79, 0x00, 0x00},
+		Version:       1,
+		HashType:      1,
+		DataBlockSize: 4096,
+		HashBlockSize: 4096,
+		Algorithm:     [32]byte{0x73, 0x68, 0x61, 0x32, 0x35, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	}
+}
+
 // VerityParams contains parameters for verity volume
 type VerityParams struct {
 	HashName       string
@@ -34,7 +46,17 @@ type VerityParams struct {
 	Salt           []byte
 	SaltSize       uint16
 	HashAreaOffset uint64
-	Flags          uint32
+	NoSuperblock   bool
+}
+
+func DefaultVerityParams() VerityParams {
+	return VerityParams{
+		HashName:      "sha256",
+		DataBlockSize: 4096,
+		HashBlockSize: 4096,
+		HashType:      1,
+		NoSuperblock:  false,
+	}
 }
 
 // IsBlockSizeValid checks if block size is valid

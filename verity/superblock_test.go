@@ -13,7 +13,7 @@ import (
 
 func TestSuperBlockSerialization(t *testing.T) {
 	// Create a new superblock with default values
-	sb := NewSuperBlock()
+	sb := DefaultVeritySuperblock()
 
 	// Verify default values
 	if string(sb.Signature[:]) != VeritySignature {
@@ -225,7 +225,7 @@ func TestSuperBlockAgainstVeritySetup(t *testing.T) {
 	}
 
 	// Create a superblock with our Go implementation
-	goSb := NewSuperBlock()
+	goSb := DefaultVeritySuperblock()
 	goSb.DataBlockSize = dataBlockSize
 	goSb.HashBlockSize = hashBlockSize
 	goSb.DataBlocks = dataSize / uint64(dataBlockSize)
