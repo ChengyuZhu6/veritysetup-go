@@ -44,16 +44,12 @@ func createEmptyFile(path string, size uint64) error {
 
 // setupVerityTestParams creates default test parameters
 func setupVerityTestParams(dataSize uint64) *VerityParams {
-	return &VerityParams{
-		HashName:       "sha256",
-		DataBlockSize:  4096,
-		HashBlockSize:  4096,
-		DataBlocks:     dataSize / 4096,
-		HashType:       1,
-		Salt:           make([]byte, 32),
-		SaltSize:       32,
-		HashAreaOffset: 8192, // first block is the superblock data, second block is the fec data.
-	}
+	params := DefaultVerityParams()
+	params.DataBlocks = dataSize / 4096
+	params.Salt = make([]byte, 32)
+	params.SaltSize = 32
+	params.HashAreaOffset = 8192
+	return &params
 }
 
 // calculateHashDeviceSize calculates the required hash device size

@@ -7,7 +7,7 @@ import (
 )
 
 // NewSuperBlock creates a new verity superblock with default values
-func NewSuperBlock() *VeritySuperblock {
+func NewSuperBlock(params *VerityParams) *VeritySuperblock {
 	sb := &VeritySuperblock{}
 	copy(sb.Signature[:], VeritySignature)
 	sb.Version = 1
