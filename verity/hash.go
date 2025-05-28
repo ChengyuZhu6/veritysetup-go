@@ -99,7 +99,7 @@ func (vh *VerityHash) calculateHashLevels() ([]hashTreeLevel, error) {
 	}
 	levels := make([]hashTreeLevel, 0)
 
-	blocks := vh.params.DataSize
+	blocks := vh.params.DataBlocks
 	offset := vh.params.HashAreaOffset
 
 	// First level starts at the offset

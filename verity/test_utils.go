@@ -48,7 +48,7 @@ func setupVerityTestParams(dataSize uint64) *VerityParams {
 		HashName:       "sha256",
 		DataBlockSize:  4096,
 		HashBlockSize:  4096,
-		DataSize:       dataSize / 4096,
+		DataBlocks:     dataSize / 4096,
 		HashType:       1,
 		Salt:           make([]byte, 32),
 		SaltSize:       32,
@@ -105,7 +105,7 @@ func readFileContent(path string) ([]byte, error) {
 // compareVerityImplementations compares our implementation with veritysetup
 func compareVerityImplementations(t *testing.T, params *VerityParams, dataPath, hashPath string) error {
 	// Prepare test data
-	setupTestData(t, dataPath, hashPath, params.DataSize*uint64(params.DataBlockSize))
+	setupTestData(t, dataPath, hashPath, params.DataBlocks*uint64(params.DataBlockSize))
 
 	// Use our implementation to generate hash
 	ourVh := NewVerityHash(params, dataPath, hashPath, nil)

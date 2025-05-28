@@ -29,7 +29,7 @@ type VerityParams struct {
 	HashName       string
 	DataBlockSize  uint32
 	HashBlockSize  uint32
-	DataSize       uint64
+	DataBlocks     uint64
 	HashType       uint32
 	Salt           []byte
 	SaltSize       uint16
