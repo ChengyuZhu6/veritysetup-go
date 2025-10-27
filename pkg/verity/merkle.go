@@ -3,15 +3,14 @@ package verity
 import (
 	"bytes"
 	"crypto"
-	_ "crypto/sha1"   // Import SHA1
-	_ "crypto/sha256" // Import SHA256
-	_ "crypto/sha512" // Import SHA512
+	_ "crypto/sha1"
+	_ "crypto/sha256"
+	_ "crypto/sha512"
 	"fmt"
 	"io"
 	"os"
 )
 
-// VerityHash handles hash creation and verification
 type VerityHash struct {
 	params     *VerityParams
 	dataDevice string
@@ -20,10 +19,9 @@ type VerityHash struct {
 	hashFunc   crypto.Hash
 }
 
-// NewVerityHash creates a new VerityHash instance
-func NewVerityHash(params *VerityParams, dataDevice, hashDevice string, rootHash []byte) *VerityHash {
+func NewVerityHash(p *VerityParams, dataDevice, hashDevice string, rootHash []byte) *VerityHash {
 	var hashFunc crypto.Hash
-	switch params.HashName {
+	switch p.HashName {
 	case "sha256":
 		hashFunc = crypto.SHA256
 	case "sha512":
@@ -33,16 +31,13 @@ func NewVerityHash(params *VerityParams, dataDevice, hashDevice string, rootHash
 	default:
 		hashFunc = crypto.SHA256
 	}
-
-	// Ensure hash function is available
 	if !hashFunc.Available() {
-		// Fallback to SHA256 if hash function is not available
 		hashFunc = crypto.SHA256
 	}
 
 	hashSize := hashFunc.Size()
 	vh := &VerityHash{
-		params:     params,
+		params:     p,
 		dataDevice: dataDevice,
 		hashDevice: hashDevice,
 		rootHash:   make([]byte, hashSize),
@@ -54,101 +49,70 @@ func NewVerityHash(params *VerityParams, dataDevice, hashDevice string, rootHash
 	return vh
 }
 
-// Verify verifies the verity hash tree
-func (vh *VerityHash) Verify() error {
-	return vh.createOrVerifyHash(true)
-}
+func (vh *VerityHash) Verify() error { return vh.createOrVerifyHash(true) }
+func (vh *VerityHash) Create() error { return vh.createOrVerifyHash(false) }
 
-// Create creates the verity hash tree
-func (vh *VerityHash) Create() error {
-	return vh.createOrVerifyHash(false)
-}
+func (vh *VerityHash) GetRootHash() []byte      { return vh.rootHash }
+func (vh *VerityHash) GetHashFunc() crypto.Hash { return vh.hashFunc }
+func (vh *VerityHash) GetParams() *VerityParams { return vh.params }
+func (vh *VerityHash) GetDataDevice() string    { return vh.dataDevice }
+func (vh *VerityHash) GetHashDevice() string    { return vh.hashDevice }
 
-func (vh *VerityHash) GetRootHash() []byte {
-	return vh.rootHash
-}
-
-func (vh *VerityHash) GetHashFunc() crypto.Hash {
-	return vh.hashFunc
-}
-func (vh *VerityHash) GetParams() *VerityParams {
-	return vh.params
-}
-
-func (vh *VerityHash) GetDataDevice() string {
-	return vh.dataDevice
-}
-
-func (vh *VerityHash) GetHashDevice() string {
-	return vh.hashDevice
-}
-
-// hashTreeLevel represents a level in the hash tree
 type hashTreeLevel struct {
-	offset uint64
-	size   uint64
+	offset    uint64 // byte offset of this level's first block in hash file
+	numHashes uint64 // number of hashes at this level
+	numBlocks uint64 // number of blocks occupied by this level
 }
 
-// calculateHashLevels calculates the offsets and sizes for each level of the hash tree
 func (vh *VerityHash) calculateHashLevels() ([]hashTreeLevel, error) {
 	hashSize := vh.hashFunc.Size()
-	hashPerBlock := vh.params.HashBlockSize / uint32(hashSize)
-	if hashPerBlock == 0 {
-		return nil, fmt.Errorf("hash block size %d is too small for hash size %d",
-			vh.params.HashBlockSize, hashSize)
+	hashesPerBlock := vh.params.HashBlockSize / uint32(hashSize)
+	if hashesPerBlock == 0 {
+		return nil, fmt.Errorf("hash block size %d is too small for hash size %d", vh.params.HashBlockSize, hashSize)
 	}
-	levels := make([]hashTreeLevel, 0)
 
-	blocks := vh.params.DataBlocks
-	offset := vh.params.HashAreaOffset
+	var levels []hashTreeLevel
+	remainingHashes := vh.params.DataBlocks
+	levelOffset := vh.params.HashAreaOffset
 
-	// First level starts at the offset
-	hashOffset := offset
-
-	// Calculate each level from bottom up
-	for blocks > 1 {
+	for {
+		if len(levels) >= VerityMaxLevels {
+			return nil, fmt.Errorf("hash tree exceeds maximum levels: %d", len(levels))
+		}
+		numBlocks := (remainingHashes + uint64(hashesPerBlock) - 1) / uint64(hashesPerBlock)
 		level := hashTreeLevel{
-			offset: hashOffset,
-			size:   blocks,
+			offset:    levelOffset,
+			numHashes: remainingHashes,
+			numBlocks: numBlocks,
 		}
 		levels = append(levels, level)
 
-		// Calculate next level
-		blocks = (blocks + uint64(hashPerBlock) - 1) / uint64(hashPerBlock)
-		hashOffset += blocks * uint64(vh.params.HashBlockSize)
+		if remainingHashes == 1 {
+			break // root reached
+		}
+
+		remainingHashes = numBlocks
+		levelOffset += numBlocks * uint64(vh.params.HashBlockSize)
 	}
-
-	// Add root level
-	levels = append(levels, hashTreeLevel{
-		offset: hashOffset,
-		size:   1,
-	})
-
 	return levels, nil
 }
 
-// verifyHashBlock verifies a single hash block
 func (vh *VerityHash) verifyHashBlock(data []byte, salt []byte) ([]byte, error) {
 	h := vh.hashFunc.New()
-
 	if vh.params.HashType == 1 {
-		// Write salt first, then data
 		if len(salt) > 0 {
 			h.Write(salt)
 		}
 		h.Write(data)
 	} else {
-		// Write data first, then salt
 		h.Write(data)
 		if len(salt) > 0 {
 			h.Write(salt)
 		}
 	}
-
 	return h.Sum(nil), nil
 }
 
-// readBlock reads a block from a file
 func readBlock(f *os.File, offset uint64, size uint32) ([]byte, error) {
 	buf := make([]byte, size)
 	if _, err := f.Seek(int64(offset), 0); err != nil {
@@ -160,7 +124,6 @@ func readBlock(f *os.File, offset uint64, size uint32) ([]byte, error) {
 	return buf, nil
 }
 
-// writeBlock writes a block to a file
 func writeBlock(f *os.File, offset uint64, data []byte) error {
 	if _, err := f.Seek(int64(offset), 0); err != nil {
 		return err
@@ -172,7 +135,6 @@ func writeBlock(f *os.File, offset uint64, data []byte) error {
 }
 
 func (vh *VerityHash) createOrVerifyHash(verify bool) error {
-	// Open device files
 	dataFile, hashFile, err := vh.openDeviceFiles(verify)
 	if err != nil {
 		return fmt.Errorf("failed to open device files: %w", err)
@@ -180,143 +142,151 @@ func (vh *VerityHash) createOrVerifyHash(verify bool) error {
 	defer dataFile.Close()
 	defer hashFile.Close()
 
-	// Calculate hash tree levels
+	// Prepare or adopt superblock and set HashAreaOffset accordingly
+	if err := vh.prepareHashArea(hashFile, verify); err != nil {
+		return err
+	}
 	levels, err := vh.calculateHashLevels()
 	if err != nil {
 		return fmt.Errorf("failed to calculate hash levels: %w", err)
 	}
-
 	if len(levels) > VerityMaxLevels {
 		return fmt.Errorf("hash tree exceeds maximum levels: %d", len(levels))
 	}
-
-	// Create hash buffers
 	hashBuffers := vh.createHashBuffers(levels)
-
-	// Process each hash level
 	currentHash, err := vh.processHashLevels(levels, hashBuffers, dataFile, hashFile, verify)
 	if err != nil {
 		return err
 	}
-
-	// Verify or save root hash
 	return vh.finalizeRootHash(currentHash, verify)
 }
 
-// openDeviceFiles opens data and hash device files
+func (vh *VerityHash) prepareHashArea(hashFile *os.File, verify bool) error {
+	if vh.params.NoSuperblock {
+		if vh.params.HashAreaOffset%uint64(vh.params.HashBlockSize) != 0 {
+			return fmt.Errorf("hash area offset %d not aligned to hash block size %d", vh.params.HashAreaOffset, vh.params.HashBlockSize)
+		}
+		return nil
+	}
+
+	if verify {
+		sbData, err := readBlock(hashFile, 0, VeritySuperblockSize)
+		if err != nil {
+			return fmt.Errorf("read superblock: %w", err)
+		}
+		sb, err := DeserializeSuperBlock(sbData)
+		if err != nil {
+			return err
+		}
+		if err := validateAndAdoptSuperblock(vh.params, sb); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	sb, err := buildSuperblockFromParams(vh.params)
+	if err != nil {
+		return err
+	}
+	data, err := sb.Serialize()
+	if err != nil {
+		return err
+	}
+	if err := writeBlock(hashFile, 0, data); err != nil {
+		return fmt.Errorf("write superblock: %w", err)
+	}
+	vh.params.HashAreaOffset = alignUp(VeritySuperblockSize, uint64(vh.params.HashBlockSize))
+	return nil
+}
+
 func (vh *VerityHash) openDeviceFiles(verify bool) (*os.File, *os.File, error) {
 	dataFile, err := os.OpenFile(vh.dataDevice, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot open data device: %w", err)
 	}
-
 	flag := os.O_RDONLY
 	if !verify {
 		flag = os.O_RDWR
 	}
-
 	hashFile, err := os.OpenFile(vh.hashDevice, flag, 0)
 	if err != nil {
 		dataFile.Close()
 		return nil, nil, fmt.Errorf("cannot open hash device: %w", err)
 	}
-
 	return dataFile, hashFile, nil
 }
 
-// createHashBuffers creates hash buffers for each level
 func (vh *VerityHash) createHashBuffers(levels []hashTreeLevel) [][]byte {
 	hashSize := vh.hashFunc.Size()
 	hashBuffers := make([][]byte, len(levels))
 	for i := range hashBuffers {
-		hashBuffers[i] = make([]byte, levels[i].size*uint64(hashSize))
+		hashBuffers[i] = make([]byte, levels[i].numHashes*uint64(hashSize))
 	}
 	return hashBuffers
 }
 
-// processHashLevels processes all hash levels
-func (vh *VerityHash) processHashLevels(levels []hashTreeLevel, hashBuffers [][]byte,
-	dataFile, hashFile *os.File, verify bool) ([]byte, error) {
-
+func (vh *VerityHash) processHashLevels(levels []hashTreeLevel, hashBuffers [][]byte, dataFile, hashFile *os.File, verify bool) ([]byte, error) {
 	hashSize := uint32(vh.hashFunc.Size())
 	currentHash := make([]byte, hashSize)
-
 	for i := 0; i < len(levels); i++ {
-		for j := uint64(0); j < levels[i].size; j++ {
-			blockData, err := vh.readBlockData(i, j, hashSize, levels, hashBuffers, dataFile)
+		for j := uint64(0); j < levels[i].numHashes; j++ {
+			blockData, err := vh.readBlockData(i, j, hashSize, hashBuffers, dataFile)
 			if err != nil {
 				return nil, err
 			}
-
 			hash, err := vh.verifyHashBlock(blockData, vh.params.Salt)
 			if err != nil {
 				return nil, fmt.Errorf("failed to calculate hash at level %d block %d: %w", i, j, err)
 			}
-
 			if err := vh.handleHashResult(i, j, hash, hashBuffers, hashFile, levels, verify); err != nil {
 				return nil, err
 			}
-
 			copy(currentHash, hash)
 		}
-
-		// Write to hash file
-		if !verify && i == 0 {
-			if err := writeBlock(hashFile, levels[i].offset, hashBuffers[i]); err != nil {
-				return nil, fmt.Errorf("failed to write hash level: %w", err)
-			}
-		}
 	}
-
 	return currentHash, nil
 }
 
-// readBlockData reads data for specified level and block
-func (vh *VerityHash) readBlockData(level int, blockNum uint64, hashSize uint32,
-	levels []hashTreeLevel, hashBuffers [][]byte, dataFile *os.File) ([]byte, error) {
-
+func (vh *VerityHash) readBlockData(level int, blockNum uint64, hashSize uint32, hashBuffers [][]byte, dataFile *os.File) ([]byte, error) {
 	if level == 0 {
 		return readBlock(dataFile, blockNum*uint64(vh.params.DataBlockSize), vh.params.DataBlockSize)
 	}
-
 	hashPerBlock := vh.params.HashBlockSize / uint32(hashSize)
 	blockStart := blockNum * uint64(hashPerBlock) * uint64(hashSize)
 	blockEnd := blockStart + uint64(hashPerBlock*hashSize)
 	if blockEnd > uint64(len(hashBuffers[level-1])) {
 		blockEnd = uint64(len(hashBuffers[level-1]))
 	}
-
 	blockData := make([]byte, vh.params.HashBlockSize)
 	copy(blockData, hashBuffers[level-1][blockStart:blockEnd])
 	return blockData, nil
 }
 
-// handleHashResult handles the hash calculation result
-func (vh *VerityHash) handleHashResult(level int, blockNum uint64, hash []byte,
-	hashBuffers [][]byte, hashFile *os.File, levels []hashTreeLevel, verify bool) error {
+func (vh *VerityHash) handleHashResult(level int, hashIndex uint64, hash []byte, hashBuffers [][]byte, hashFile *os.File, levels []hashTreeLevel, verify bool) error {
+	copy(hashBuffers[level][hashIndex*uint64(vh.hashFunc.Size()):], hash)
+
+	hashSize := uint32(vh.hashFunc.Size())
+	hashesPerBlock := vh.params.HashBlockSize / hashSize
+	blockIndex := hashIndex / uint64(hashesPerBlock)
+	intra := (hashIndex % uint64(hashesPerBlock)) * uint64(hashSize)
+	offset := levels[level].offset + blockIndex*uint64(vh.params.HashBlockSize) + intra
 
 	if verify {
-		if level == 0 {
-			offset := levels[level].offset + blockNum*uint64(vh.hashFunc.Size())
-
-			storedHash, err := readBlock(hashFile, offset, uint32(vh.hashFunc.Size()))
-			if err != nil {
-				return fmt.Errorf("failed to read stored hash at level %d block %d: %w", level, blockNum, err)
-			}
-
-			if !bytes.Equal(hash, storedHash) {
-				return fmt.Errorf("hash mismatch at level %d block %d", level, blockNum)
-			}
+		storedHash, err := readBlock(hashFile, offset, hashSize)
+		if err != nil {
+			return fmt.Errorf("failed to read stored hash at level %d index %d: %w", level, hashIndex, err)
 		}
+		if !bytes.Equal(hash, storedHash) {
+			return fmt.Errorf("hash mismatch at level %d index %d", level, hashIndex)
+		}
+		return nil
 	}
-
-	// Save hash to buffer
-	copy(hashBuffers[level][blockNum*uint64(vh.hashFunc.Size()):], hash)
-
+	if err := writeBlock(hashFile, offset, hash); err != nil {
+		return fmt.Errorf("failed to write hash at level %d index %d: %w", level, hashIndex, err)
+	}
 	return nil
 }
 
-// finalizeRootHash verifies or saves the root hash
 func (vh *VerityHash) finalizeRootHash(currentHash []byte, verify bool) error {
 	if verify {
 		if !bytes.Equal(currentHash, vh.rootHash) {
@@ -324,7 +294,6 @@ func (vh *VerityHash) finalizeRootHash(currentHash []byte, verify bool) error {
 		}
 		return nil
 	}
-
 	copy(vh.rootHash, currentHash)
 	return nil
 }
