@@ -14,14 +14,19 @@ func SetupTestData(dataPath, hashPath string, p *VerityParams, dataSize uint64) 
 	if err := GenerateRandomFile(dataPath, dataSize); err != nil {
 		return fmt.Errorf("failed to generate test data: %w", err)
 	}
+	// Set HashAreaOffset before calculating levels
+	if !p.NoSuperblock && p.HashAreaOffset == 0 {
+		p.HashAreaOffset = alignUp(VeritySuperblockSize, uint64(p.HashBlockSize))
+	}
 	vh := NewVerityHash(p, dataPath, hashPath, nil)
 	levels, err := vh.calculateHashLevels()
 	if err != nil {
 		return fmt.Errorf("failed to calculate levels: %w", err)
 	}
+	// Calculate total size: exclude root level (last level) since root hash is not stored in file
 	var totalTreeBytes uint64
-	for _, lvl := range levels {
-		totalTreeBytes += lvl.numBlocks * uint64(p.HashBlockSize)
+	for i := 0; i < len(levels)-1; i++ {
+		totalTreeBytes += levels[i].numBlocks * uint64(p.HashBlockSize)
 	}
 	totalSize := p.HashAreaOffset + totalTreeBytes
 	f, err := os.OpenFile(hashPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
@@ -59,7 +64,12 @@ func GetVeritySetupRootHash(dataPath string, hashPath string, p *VerityParams) (
 		"--hash", p.HashName,
 		"--data-block-size", strconv.FormatUint(uint64(p.DataBlockSize), 10),
 		"--hash-block-size", strconv.FormatUint(uint64(p.HashBlockSize), 10),
-		"--salt", hex.EncodeToString(p.Salt))
+		"--salt", hex.EncodeToString(p.Salt),
+		"--uuid", "00000000-0000-0000-0000-000000000000",
+	)
+	if p.NoSuperblock {
+		cmd.Args = append(cmd.Args, "--no-superblock")
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("veritysetup failed: %w", err)

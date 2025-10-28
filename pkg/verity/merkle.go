@@ -73,27 +73,32 @@ func (vh *VerityHash) calculateHashLevels() ([]hashTreeLevel, error) {
 
 	var levels []hashTreeLevel
 	remainingHashes := vh.params.DataBlocks
-	levelOffset := vh.params.HashAreaOffset
 
+	// Build levels from leaves (level 0) up to root (last), without offsets
 	for {
 		if len(levels) >= VerityMaxLevels {
 			return nil, fmt.Errorf("hash tree exceeds maximum levels: %d", len(levels))
 		}
 		numBlocks := (remainingHashes + uint64(hashesPerBlock) - 1) / uint64(hashesPerBlock)
-		level := hashTreeLevel{
-			offset:    levelOffset,
+		levels = append(levels, hashTreeLevel{
 			numHashes: remainingHashes,
 			numBlocks: numBlocks,
-		}
-		levels = append(levels, level)
-
+		})
 		if remainingHashes == 1 {
-			break // root reached
+			break
 		}
-
 		remainingHashes = numBlocks
-		levelOffset += numBlocks * uint64(vh.params.HashBlockSize)
 	}
+
+	// Assign offsets: root hash is not stored, so start from level len-2
+	// veritysetup layout: level len-2 at HashAreaOffset, then down to leaves (level 0)
+	nextOffset := vh.params.HashAreaOffset
+	for i := len(levels) - 2; i >= 0; i-- {
+		levels[i].offset = nextOffset
+		nextOffset += levels[i].numBlocks * uint64(vh.params.HashBlockSize)
+	}
+	// Root level (len-1) offset is not used since root hash is not written to file
+	levels[len(levels)-1].offset = 0
 	return levels, nil
 }
 
@@ -271,7 +276,13 @@ func (vh *VerityHash) handleHashResult(level int, hashIndex uint64, hash []byte,
 	intra := (hashIndex % uint64(hashesPerBlock)) * uint64(hashSize)
 	offset := levels[level].offset + blockIndex*uint64(vh.params.HashBlockSize) + intra
 
+	isLastLevel := level == len(levels)-1
+
 	if verify {
+		// Root digest is not stored in hash area; skip comparing against disk on last level
+		if isLastLevel {
+			return nil
+		}
 		storedHash, err := readBlock(hashFile, offset, hashSize)
 		if err != nil {
 			return fmt.Errorf("failed to read stored hash at level %d index %d: %w", level, hashIndex, err)
@@ -279,6 +290,10 @@ func (vh *VerityHash) handleHashResult(level int, hashIndex uint64, hash []byte,
 		if !bytes.Equal(hash, storedHash) {
 			return fmt.Errorf("hash mismatch at level %d index %d", level, hashIndex)
 		}
+		return nil
+	}
+	// Do not write the root digest to the hash file (veritysetup behavior)
+	if isLastLevel {
 		return nil
 	}
 	if err := writeBlock(hashFile, offset, hash); err != nil {

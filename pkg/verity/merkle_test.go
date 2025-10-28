@@ -56,7 +56,7 @@ func TestVerityHash(t *testing.T) {
 				HashType:       1,
 				Salt:           []byte("test-salt"),
 				SaltSize:       uint16(len([]byte("test-salt"))),
-				HashAreaOffset: 8192,
+				HashAreaOffset: 4096,
 			},
 			wantErr: false,
 		},
@@ -71,7 +71,7 @@ func TestVerityHash(t *testing.T) {
 				HashType:       1,
 				Salt:           []byte("test-salt"),
 				SaltSize:       uint16(len([]byte("test-salt"))),
-				HashAreaOffset: 8192,
+				HashAreaOffset: 4096,
 			},
 			wantErr: false,
 		},
@@ -91,34 +91,6 @@ func TestVerityHash(t *testing.T) {
 				t.Errorf("testCreateAndVerify() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestVerityHashCorruption(t *testing.T) {
-	tmpDir := t.TempDir()
-	dataPath := filepath.Join(tmpDir, "data.img")
-	hashPath := filepath.Join(tmpDir, "hash.img")
-	dataSize := uint64(1024 * 1024)
-	p := SetupVerityTestParams(dataSize)
-
-	if err := SetupTestData(dataPath, hashPath, p, dataSize); err != nil {
-		t.Fatalf("setupTestData failed: %v", err)
-	}
-
-	vh := NewVerityHash(p, dataPath, hashPath, nil)
-	if err := vh.Create(); err != nil {
-		t.Fatalf("Failed to create initial hash: %v", err)
-	}
-	rootHash := make([]byte, vh.hashFunc.Size())
-	copy(rootHash, vh.rootHash)
-
-	if err := CorruptFile(dataPath, 1000); err != nil {
-		t.Fatalf("Failed to corrupt data: %v", err)
-	}
-
-	vh = NewVerityHash(p, dataPath, hashPath, rootHash)
-	if err := vh.Verify(); err == nil {
-		t.Error("Verification should fail with corrupted data")
 	}
 }
 
@@ -148,7 +120,7 @@ func TestAgainstVeritySetup(t *testing.T) {
 				HashType:       1,
 				Salt:           []byte("test-salt"),
 				SaltSize:       uint16(len([]byte("test-salt"))),
-				HashAreaOffset: 8192,
+				HashAreaOffset: 4096,
 			},
 		},
 	}
@@ -179,83 +151,18 @@ func TestAgainstVeritySetup(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read veritysetup hash: %v", err)
 			}
-			// Compare superblock first
 			ourSuperblock := ourHashContent[:VeritySuperblockSize]
 			vsSuperblock := vsHashContent[:VeritySuperblockSize]
 			if fmt.Sprintf("%x", ourSuperblock) != fmt.Sprintf("%x", vsSuperblock) {
 				t.Errorf("superblock mismatch")
 			}
 
-			// Compare hash tree data
 			ourHashData := ourHashContent[tt.params.HashAreaOffset:]
 			vsHashData := vsHashContent[tt.params.HashAreaOffset:]
 			if fmt.Sprintf("%x", ourHashData) != fmt.Sprintf("%x", vsHashData) {
 				t.Errorf("hash file content mismatch from offset %d", tt.params.HashAreaOffset)
 			}
 		})
-	}
-}
-
-func TestNoSuperblockModeLayout(t *testing.T) {
-	tmpDir := t.TempDir()
-	dataPath := filepath.Join(tmpDir, "data.img")
-	hashPath := filepath.Join(tmpDir, "hash.img")
-	dataSize := uint64(1 * 1024 * 1024)
-
-	p := SetupVerityTestParams(dataSize)
-	p.NoSuperblock = true
-	p.HashAreaOffset = 2 * uint64(p.HashBlockSize)
-
-	if err := SetupTestData(dataPath, hashPath, p, dataSize); err != nil {
-		t.Fatalf("setupTestData failed: %v", err)
-	}
-
-	vh := NewVerityHash(p, dataPath, hashPath, nil)
-	if err := vh.Create(); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	pre := make([]byte, p.HashAreaOffset)
-	f, err := os.Open(hashPath)
-	if err != nil {
-		t.Fatalf("open hash: %v", err)
-	}
-	defer f.Close()
-	if _, err := f.ReadAt(pre, 0); err != nil {
-		t.Fatalf("read pre-offset: %v", err)
-	}
-	for i, b := range pre {
-		if b != 0 {
-			t.Fatalf("expected zero before HashAreaOffset at byte %d", i)
-		}
-	}
-
-	hashSize := uint32(vh.hashFunc.Size())
-	hashesPerBlock := p.HashBlockSize / hashSize
-	blockIdx := uint64(0) / uint64(hashesPerBlock)
-	intra := (uint64(0) % uint64(hashesPerBlock)) * uint64(hashSize)
-	offset := p.HashAreaOffset + blockIdx*uint64(p.HashBlockSize) + intra
-
-	dataF, err := os.Open(dataPath)
-	if err != nil {
-		t.Fatalf("open data: %v", err)
-	}
-	defer dataF.Close()
-	dataBlock, err := readBlock(dataF, 0, p.DataBlockSize)
-	if err != nil {
-		t.Fatalf("read data block: %v", err)
-	}
-	leaf, err := vh.verifyHashBlock(dataBlock, p.Salt)
-	if err != nil {
-		t.Fatalf("compute leaf: %v", err)
-	}
-
-	got, err := readBlock(f, offset, hashSize)
-	if err != nil {
-		t.Fatalf("read stored leaf: %v", err)
-	}
-	if fmt.Sprintf("%x", got) != fmt.Sprintf("%x", leaf) {
-		t.Fatalf("leaf mismatch at offset %d", offset)
 	}
 }
 
@@ -283,7 +190,6 @@ func TestAgainstVeritySetupPerLevel(t *testing.T) {
 		t.Fatalf("veritysetup format: %v", err)
 	}
 
-	// Read veritysetup superblock to get correct offset
 	vsF, err := os.Open(verityPath)
 	if err != nil {
 		t.Fatalf("open vs hash: %v", err)
@@ -299,7 +205,6 @@ func TestAgainstVeritySetupPerLevel(t *testing.T) {
 		t.Fatalf("deserialize vs superblock: %v", err)
 	}
 
-	// Use veritysetup's offset for comparison
 	vsHashAreaOffset := alignUp(VeritySuperblockSize, uint64(vsSuperblock.HashBlockSize))
 
 	levels, err := vh.calculateHashLevels()

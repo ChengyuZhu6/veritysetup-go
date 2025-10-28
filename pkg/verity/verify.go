@@ -105,11 +105,17 @@ func (v *Verifier) VerifyBlock(blockIndex uint64) error {
 		return fmt.Errorf("compute leaf: %w", err)
 	}
 
+	// With root-first layout, leaves are at levels[0].offset
+	levels, err := v.vh.calculateHashLevels()
+	if err != nil {
+		return err
+	}
+	leafBase := levels[0].offset
 	hashSize := uint32(v.vh.hashFunc.Size())
 	hashesPerBlock := v.vh.params.HashBlockSize / hashSize
 	blockIdx := blockIndex / uint64(hashesPerBlock)
 	intra := (blockIndex % uint64(hashesPerBlock)) * uint64(hashSize)
-	offset := v.vh.params.HashAreaOffset + blockIdx*uint64(v.vh.params.HashBlockSize) + intra
+	offset := leafBase + blockIdx*uint64(v.vh.params.HashBlockSize) + intra
 	stored, err := readBlock(v.hashFile, offset, hashSize)
 	if err != nil {
 		return fmt.Errorf("read stored leaf: %w", err)
@@ -156,15 +162,18 @@ func (v *Verifier) verifyPathAcrossLevels(leafIndex uint64) error {
 		}
 
 		parentIndex := childBlockIndex
-		parentBlockIndex := parentIndex / uint64(hashesPerBlock)
-		intra := (parentIndex % uint64(hashesPerBlock)) * uint64(hashSize)
-		parentOffset := levels[level+1].offset + parentBlockIndex*uint64(v.vh.params.HashBlockSize) + intra
-		storedParent, err := readBlock(v.hashFile, parentOffset, hashSize)
-		if err != nil {
-			return fmt.Errorf("read stored parent at level %d: %w", level+1, err)
-		}
-		if !bytes.Equal(storedParent, computedParent) {
-			return fmt.Errorf("parent mismatch at level %d index %d", level+1, parentIndex)
+		// Root digest is not stored in hash area; skip on last level
+		if level+1 < len(levels)-1 {
+			parentBlockIndex := parentIndex / uint64(hashesPerBlock)
+			intra := (parentIndex % uint64(hashesPerBlock)) * uint64(hashSize)
+			parentOffset := levels[level+1].offset + parentBlockIndex*uint64(v.vh.params.HashBlockSize) + intra
+			storedParent, err := readBlock(v.hashFile, parentOffset, hashSize)
+			if err != nil {
+				return fmt.Errorf("read stored parent at level %d: %w", level+1, err)
+			}
+			if !bytes.Equal(storedParent, computedParent) {
+				return fmt.Errorf("parent mismatch at level %d index %d", level+1, parentIndex)
+			}
 		}
 
 		lastComputed = computedParent
