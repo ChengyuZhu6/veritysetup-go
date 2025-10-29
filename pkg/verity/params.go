@@ -11,6 +11,7 @@ type VerityParams struct {
 	SaltSize       uint16
 	HashAreaOffset uint64
 	NoSuperblock   bool
+	UUID           [16]byte
 }
 
 // DefaultVerityParams returns recommended defaults for verity parameters.
