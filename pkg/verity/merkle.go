@@ -308,3 +308,10 @@ func (vh *VerityHash) finalizeRootHash(currentHash []byte, verify bool) error {
 	copy(vh.rootHash, currentHash)
 	return nil
 }
+
+// RootHash returns a copy of the computed root hash digest.
+func (vh *VerityHash) RootHash() []byte {
+	out := make([]byte, len(vh.rootHash))
+	copy(out, vh.rootHash)
+	return out
+}

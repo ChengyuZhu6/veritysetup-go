@@ -113,6 +113,7 @@ func buildSuperblockFromParams(p *VerityParams) (*VeritySuperblock, error) {
 	sb.DataBlocks = p.DataBlocks
 	sb.SaltSize = p.SaltSize
 	copy(sb.Salt[:], p.Salt)
+	sb.UUID = p.UUID
 	// write algorithm name as lower-case, null-padded
 	for i := range sb.Algorithm {
 		sb.Algorithm[i] = 0
@@ -169,6 +170,11 @@ func validateAndAdoptSuperblock(p *VerityParams, sb *VeritySuperblock) error {
 		if p.SaltSize != sb.SaltSize || !bytes.Equal(p.Salt, sb.Salt[:sb.SaltSize]) {
 			return fmt.Errorf("salt mismatch")
 		}
+	}
+	if p.UUID == ([16]byte{}) {
+		p.UUID = sb.UUID
+	} else if p.UUID != sb.UUID {
+		return fmt.Errorf("UUID mismatch")
 	}
 	p.HashAreaOffset = alignUp(VeritySuperblockSize, uint64(p.HashBlockSize))
 	return nil
