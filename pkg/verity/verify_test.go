@@ -23,7 +23,7 @@ func TestVerifierVerifyAll(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	v, err := NewVerifier(p, data, hash, vh.rootHash, VerifyAlways)
+	v, err := NewVerifier(p, data, hash, vh.rootHash)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
@@ -34,38 +34,7 @@ func TestVerifierVerifyAll(t *testing.T) {
 	}
 }
 
-func TestVerifierRangeAndBlock(t *testing.T) {
-	tmp := t.TempDir()
-	data := filepath.Join(tmp, "data.img")
-	hash := filepath.Join(tmp, "hash.img")
-	size := uint64(2 * 1024 * 1024)
-	p := setupVerityTestParams(size)
-	if err := setupTestData(data, hash, p, size); err != nil {
-		t.Fatalf("setup: %v", err)
-	}
-
-	vh := NewVerityHash(p, data, hash, nil)
-	if err := vh.Create(); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-
-	v, err := NewVerifier(p, data, hash, vh.rootHash, VerifyAtMostOnce)
-	if err != nil {
-		t.Fatalf("NewVerifier: %v", err)
-	}
-	defer v.Close()
-
-	if err := v.VerifyRange(0, size/2); err != nil {
-		t.Fatalf("VerifyRange: %v", err)
-	}
-	lastBlock := p.DataBlocks - 1
-	if err := v.VerifyBlock(lastBlock); err != nil {
-		t.Fatalf("VerifyBlock: %v", err)
-	}
-	if err := v.VerifyBlock(lastBlock); err != nil {
-		t.Fatalf("VerifyBlock repeat: %v", err)
-	}
-}
+// Range and per-block verification were removed; we keep VerifyAll tests only.
 
 func TestVerifierDetectsCorruption(t *testing.T) {
 	tmp := t.TempDir()
@@ -86,13 +55,13 @@ func TestVerifierDetectsCorruption(t *testing.T) {
 		t.Fatalf("corrupt: %v", err)
 	}
 
-	v, err := NewVerifier(p, data, hash, vh.rootHash, VerifyAlways)
+	v, err := NewVerifier(p, data, hash, vh.rootHash)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
 	defer v.Close()
 
-	if err := v.VerifyBlock(0); err == nil {
+	if err := v.VerifyAll(); err == nil {
 		t.Fatalf("expected corruption error, got nil")
 	}
 }
@@ -130,7 +99,7 @@ func TestVerifierAgainstVeritySetup(t *testing.T) {
 		t.Fatalf("veritysetup verify failed: %v\nOutput: %s", err, out)
 	}
 
-	v, err := NewVerifier(p, data, verityHashPath, root, VerifyAlways)
+	v, err := NewVerifier(p, data, verityHashPath, root)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
@@ -154,7 +123,7 @@ func TestVerifierAgainstVeritySetup(t *testing.T) {
 	if out, err := verifyCmdBad.CombinedOutput(); err == nil {
 		t.Fatalf("expected veritysetup verify to fail after corruption, got success. Output: %s", out)
 	}
-	if err := v.VerifyBlock(0); err == nil {
+	if err := v.VerifyAll(); err == nil {
 		t.Fatalf("expected corruption with veritysetup hash, got nil")
 	}
 }
@@ -178,7 +147,7 @@ func TestVerifierNoSuperblock(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	v, err := NewVerifier(p, data, hash, vh.rootHash, VerifyAlways)
+	v, err := NewVerifier(p, data, hash, vh.rootHash)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
@@ -192,13 +161,13 @@ func TestVerifierNoSuperblock(t *testing.T) {
 		t.Fatalf("corrupt: %v", err)
 	}
 
-	v2, err := NewVerifier(p, data, hash, vh.rootHash, VerifyAlways)
+	v2, err := NewVerifier(p, data, hash, vh.rootHash)
 	if err != nil {
 		t.Fatalf("NewVerifier after corruption: %v", err)
 	}
 	defer v2.Close()
 
-	if err := v2.VerifyBlock(0); err == nil {
+	if err := v2.VerifyAll(); err == nil {
 		t.Fatalf("expected corruption error, got nil")
 	}
 }
@@ -254,7 +223,7 @@ func TestVerifierNoSuperblockAgainstVeritySetup(t *testing.T) {
 
 	// Verify veritysetup's hash file with our verifier
 	verityHashPath := hash + ".verity"
-	v, err := NewVerifier(p, data, verityHashPath, vsRoot, VerifyAlways)
+	v, err := NewVerifier(p, data, verityHashPath, vsRoot)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
@@ -282,7 +251,7 @@ func TestVerifierNoSuperblockAgainstVeritySetup(t *testing.T) {
 		t.Fatalf("expected veritysetup verify to fail after corruption, got success. Output: %s", out)
 	}
 
-	if err := v.VerifyBlock(0); err == nil {
+	if err := v.VerifyAll(); err == nil {
 		t.Fatalf("expected corruption with veritysetup hash, got nil")
 	}
 }
