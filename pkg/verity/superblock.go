@@ -179,3 +179,10 @@ func validateAndAdoptSuperblock(p *VerityParams, sb *VeritySuperblock) error {
 	p.HashAreaOffset = alignUp(VeritySuperblockSize, uint64(p.HashBlockSize))
 	return nil
 }
+
+// AdoptParamsFromSuperblock validates the provided superblock and populates
+// the given VerityParams with values derived from it (algorithm, block sizes,
+// data blocks, salt, UUID, and HashAreaOffset). Returns error if incompatible.
+func AdoptParamsFromSuperblock(p *VerityParams, sb *VeritySuperblock) error {
+	return validateAndAdoptSuperblock(p, sb)
+}

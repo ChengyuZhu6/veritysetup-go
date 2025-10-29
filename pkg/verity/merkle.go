@@ -156,6 +156,18 @@ func (vh *VerityHash) createOrVerifyHash(verify bool) error {
 	if len(levels) > VerityMaxLevels {
 		return fmt.Errorf("hash tree exceeds maximum levels: %d", len(levels))
 	}
+	// For creation, ensure the hash file is sized to the full required size so
+	// tools using O_DIRECT (e.g., veritysetup) do not hit sparse-hole reads.
+	if !verify {
+		var totalTreeBytes uint64
+		for i := 0; i < len(levels)-1; i++ { // exclude last level (root)
+			totalTreeBytes += levels[i].numBlocks * uint64(vh.params.HashBlockSize)
+		}
+		totalSize := vh.params.HashAreaOffset + totalTreeBytes
+		if err := hashFile.Truncate(int64(totalSize)); err != nil {
+			return fmt.Errorf("preallocate hash file: %w", err)
+		}
+	}
 	hashBuffers := vh.createHashBuffers(levels)
 	currentHash, err := vh.processHashLevels(levels, hashBuffers, dataFile, hashFile, verify)
 	if err != nil {
