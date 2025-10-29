@@ -22,16 +22,19 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
-      - name: Install veritysetup
+      - name: Install dm tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y cryptsetup
+          sudo apt-get install -y cryptsetup dmsetup
+          sudo modprobe dm-mod
+          sudo modprobe dm-zero
+          sudo modprobe dm-verity
 
       - name: Install dependencies
         run: go mod download
 
-      - name: Run tests
-        run: go test -v -race ./...
+      - name: Run unit tests (race)
+        run: sudo -E go test -v -race ./...
 
   golangci:
     name: Lint
