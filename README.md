@@ -18,6 +18,7 @@ Currently implemented:
 - Data corruption detection
 - Configurable block sizes
 - Flexible salt configurations
+- User-space verifier API for full/partial verification
 
 ## Installation
 
@@ -33,14 +34,13 @@ This library can be used as a drop-in replacement for veritysetup in Go projects
 
 ```go
 params := &verity.VerityParams{
-    HashName:       "sha256", // Supports "sha1", "sha256", "sha512"
-    DataBlockSize:  4096,
-    HashBlockSize:  4096,
-    DataSize:       fileSize / 4096, // number of blocks
-    HashType:       1,
-    Salt:           make([]byte, 32),
-    SaltSize:       32,
-    HashAreaOffset: 8192, // first block is the superblock data, second block is the fec data.
+    HashName:      "sha256", // supports "sha1", "sha256", "sha512"
+    DataBlockSize: 4096,
+    HashBlockSize: 4096,
+    DataBlocks:    uint64(fileSize / 4096), // number of data blocks
+    HashType:      1,
+    Salt:          make([]byte, 32),
+    SaltSize:      32,
 }
 
 vh := verity.NewVerityHash(params, dataPath, hashPath, nil)
@@ -54,11 +54,36 @@ if err := vh.Create(); err != nil {
 ### Verifying Data
 
 ```go
-vh := verity.NewVerityHash(params, dataPath, hashPath, rootHash)
+vh := verity.NewVerityHash(params, dataPath, hashPath, root)
 if err := vh.Verify(); err != nil {
     log.Fatalf("Verification failed: %v", err)
 }
 ```
+
+### Using the Verifier API
+
+```go
+// Construct a verifier with the expected root digest
+verifier, err := verity.NewVerifier(params, dataPath, hashPath, root, verity.VerifyAlways)
+if err != nil {
+    log.Fatalf("NewVerifier: %v", err)
+}
+defer verifier.Close()
+
+// Verify the entire data file
+if err := verifier.VerifyAll(); err != nil {
+    log.Fatalf("VerifyAll failed: %v", err)
+}
+
+// Or verify a specific byte range (offset, length)
+if err := verifier.VerifyRange(0, 1<<20); err != nil { // first 1 MiB
+    log.Fatalf("VerifyRange failed: %v", err)
+}
+```
+
+Notes:
+- When using superblock mode (default), the library writes and validates the superblock automatically and places the hash area after it. You typically do not need to set `HashAreaOffset` manually.
+- For no-superblock mode, set `NoSuperblock = true`. Ensure `HashAreaOffset` is appropriate for your layout (often `0`).
 
 ## Project Status
 
