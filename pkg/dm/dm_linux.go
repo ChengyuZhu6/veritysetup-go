@@ -27,24 +27,27 @@ const (
 	iocRead  = 2
 )
 
-func ioc(dir, typ, nr, size uintptr) uintptr {
-	return (dir << iocDirShift) | (typ << iocTypeShift) | (nr << iocNRShift) | (size << iocSizeShift)
-}
-
-func iowr(typ, nr, size uintptr) uintptr { return ioc(iocRead|iocWrite, typ, nr, size) }
-
 // Device-mapper ioctl constants (see <linux/dm-ioctl.h>).
 // Ioctl type ("magic").
-const dmIOCTLType = 0xfd // matches Linux uapi header
+const DMIOCTLType = 0xfd // matches Linux uapi header
 
-// DM ioctl command numbers (subset).
+// UAPI size limits.
 const (
-	cmdDMDeviceReload = 2
-	cmdDMDevCreate    = 3
-	cmdDMDevRemove    = 4
-	cmdDMDevSuspend   = 6
-	cmdDMTableClear   = 9
-	cmdDMTableStatus  = 11
+	DMNameLen     = 128
+	DMUUIDLen     = 129
+	DMMaxTypeName = 16
+)
+
+// DM ioctl command numbers (subset) per <linux/dm-ioctl.h>.
+const (
+	DMDevCreateCMD  = 3 // DM_DEV_CREATE
+	DMDevRemoveCMD  = 4 // DM_DEV_REMOVE
+	DMDevSuspendCMD = 6 // DM_DEV_SUSPEND
+	DMDevStatusCMD  = 7 // DM_DEV_STATUS
+
+	DMTableLoadCMD   = 9  // DM_TABLE_LOAD
+	DMTableClearCMD  = 10 // DM_TABLE_CLEAR
+	DMTableStatusCMD = 12 // DM_TABLE_STATUS
 )
 
 // Expected DM version.
@@ -54,18 +57,13 @@ const (
 	DMVersionPatch = 0
 )
 
-// UAPI size limits.
-const (
-	DMNameLen     = 128
-	DMUUIDLen     = 129
-	DMMaxTypeName = 16
-)
-
 // dm_ioctl.flags bits (subset).
 const (
-	DMSuspendFlag     = 1 << 1
-	DMNoFlushFlag     = 1 << 2
-	DMStatusTableFlag = 1 << 4 // for DM_TABLE_STATUS vs DM_STATUS of live table
+	DMReadOnlyFlag        = 1 << 0
+	DMSuspendFlag         = 1 << 1
+	DMStatusTableFlag     = 1 << 4
+	DMActivePresentFlag   = 1 << 5
+	DMInactivePresentFlag = 1 << 6
 )
 
 // dm_ioctl per UAPI; layout must match kernel ABI.
@@ -81,7 +79,7 @@ type dmIoctl struct {
 	Dev         uint64
 	Name        [DMNameLen]byte
 	UUID        [DMUUIDLen]byte
-	_           [7]byte // aligns struct to 8 and matches kernel size
+	Data        [7]byte // aligns struct to 8 and matches kernel size
 }
 
 // dm_target_spec per UAPI.
@@ -96,6 +94,29 @@ type dmTargetSpec struct {
 // Control wraps /dev/mapper/control.
 type Control struct {
 	fd *os.File
+}
+
+// A single table target.
+type Target struct {
+	SectorStart uint64
+	Length      uint64
+	Type        string // e.g. "verity"
+	Params      string // target-specific parameters string
+}
+
+// DeviceStatus summarizes device-level status returned by DM_DEV_STATUS.
+type DeviceStatus struct {
+	OpenCount       int32
+	TargetCount     uint32
+	EventNr         uint32
+	Flags           uint32
+	Dev             uint64
+	Major           uint32
+	Minor           uint32
+	Name            string
+	UUID            string
+	ActivePresent   bool
+	InactivePresent bool
 }
 
 // Open the control device.
@@ -121,7 +142,7 @@ var ioctlSyscall = func(fd, req, arg uintptr) (uintptr, uintptr, unix.Errno) {
 }
 
 func dmReq(nr uintptr) uintptr {
-	return iowr(dmIOCTLType, nr, uintptr(unsafe.Sizeof(dmIoctl{})))
+	return iowr(DMIOCTLType, nr, uintptr(unsafe.Sizeof(dmIoctl{})))
 }
 
 func (c *Control) rawIoctl(nr uintptr, buf unsafe.Pointer) error {
@@ -150,7 +171,7 @@ func (c *Control) CreateDevice(name string) (uint64, error) {
 	buf := make([]byte, unsafe.Sizeof(dmIoctl{}))
 	io := (*dmIoctl)(unsafe.Pointer(&buf[0]))
 	*io = makeBaseIoctl(name, "", int(len(buf)))
-	if err := c.rawIoctl(cmdDMDevCreate, unsafe.Pointer(io)); err != nil {
+	if err := c.rawIoctl(DMDevCreateCMD, unsafe.Pointer(io)); err != nil {
 		return 0, fmt.Errorf("dm create '%s': %w", name, err)
 	}
 	return io.Dev, nil
@@ -161,7 +182,7 @@ func (c *Control) RemoveDevice(name string) error {
 	buf := make([]byte, unsafe.Sizeof(dmIoctl{}))
 	io := (*dmIoctl)(unsafe.Pointer(&buf[0]))
 	*io = makeBaseIoctl(name, "", int(len(buf)))
-	if err := c.rawIoctl(cmdDMDevRemove, unsafe.Pointer(io)); err != nil {
+	if err := c.rawIoctl(DMDevRemoveCMD, unsafe.Pointer(io)); err != nil {
 		return fmt.Errorf("dm remove '%s': %w", name, err)
 	}
 	return nil
@@ -175,30 +196,10 @@ func (c *Control) SuspendDevice(name string, suspend bool) error {
 	if suspend {
 		io.Flags |= DMSuspendFlag
 	}
-	if err := c.rawIoctl(cmdDMDevSuspend, unsafe.Pointer(io)); err != nil {
+	if err := c.rawIoctl(DMDevSuspendCMD, unsafe.Pointer(io)); err != nil {
 		return fmt.Errorf("dm suspend/resume '%s': %w", name, err)
 	}
 	return nil
-}
-
-// Suspend without flushing in-flight I/O.
-func (c *Control) SuspendDeviceNoFlush(name string) error {
-	buf := make([]byte, unsafe.Sizeof(dmIoctl{}))
-	io := (*dmIoctl)(unsafe.Pointer(&buf[0]))
-	*io = makeBaseIoctl(name, "", int(len(buf)))
-	io.Flags |= DMSuspendFlag | DMNoFlushFlag
-	if err := c.rawIoctl(cmdDMDevSuspend, unsafe.Pointer(io)); err != nil {
-		return fmt.Errorf("dm suspend(noflush) '%s': %w", name, err)
-	}
-	return nil
-}
-
-// A single table target.
-type Target struct {
-	SectorStart uint64
-	Length      uint64
-	Type        string // e.g. "verity"
-	Params      string // target-specific parameters string
 }
 
 // Load the provided targets into the inactive table (via DM_DEVICE_RELOAD).
@@ -243,10 +244,12 @@ func (c *Control) LoadTable(name string, targets []Target) error {
 	buf := make([]byte, headerSize+len(body))
 	io := (*dmIoctl)(unsafe.Pointer(&buf[0]))
 	*io = makeBaseIoctl(name, "", len(buf))
+	// dm-verity requires the mapped device to be read-only; set flag on load.
+	io.Flags |= DMReadOnlyFlag
 	io.TargetCount = uint32(len(targets))
 	copy(buf[headerSize:], body)
 
-	if err := c.rawIoctl(cmdDMDeviceReload, unsafe.Pointer(io)); err != nil {
+	if err := c.rawIoctl(DMTableLoadCMD, unsafe.Pointer(io)); err != nil {
 		return fmt.Errorf("dm table load '%s': %w", name, err)
 	}
 	return nil
@@ -257,13 +260,47 @@ func (c *Control) ClearTable(name string) error {
 	buf := make([]byte, unsafe.Sizeof(dmIoctl{}))
 	io := (*dmIoctl)(unsafe.Pointer(&buf[0]))
 	*io = makeBaseIoctl(name, "", int(len(buf)))
-	if err := c.rawIoctl(cmdDMTableClear, unsafe.Pointer(io)); err != nil {
+	if err := c.rawIoctl(DMTableClearCMD, unsafe.Pointer(io)); err != nil {
 		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENXIO) {
 			return nil
 		}
 		return fmt.Errorf("dm table clear '%s': %w", name, err)
 	}
 	return nil
+}
+
+// DeviceStatus returns basic device-level status (open count, target count, event number, flags).
+func (c *Control) DeviceStatus(name string) (DeviceStatus, error) {
+	buf := make([]byte, unsafe.Sizeof(dmIoctl{}))
+	io := (*dmIoctl)(unsafe.Pointer(&buf[0]))
+	*io = makeBaseIoctl(name, "", int(len(buf)))
+	if err := c.rawIoctl(DMDevStatusCMD, unsafe.Pointer(io)); err != nil {
+		return DeviceStatus{}, fmt.Errorf("dm dev status '%s': %w", name, err)
+	}
+	// Extract C strings from fixed-size arrays
+	nlen := 0
+	for nlen < len(io.Name) && io.Name[nlen] != 0 {
+		nlen++
+	}
+	ulen := 0
+	for ulen < len(io.UUID) && io.UUID[ulen] != 0 {
+		ulen++
+	}
+	maj := unix.Major(io.Dev)
+	min := unix.Minor(io.Dev)
+	return DeviceStatus{
+		OpenCount:       io.OpenCount,
+		TargetCount:     io.TargetCount,
+		EventNr:         io.EventNr,
+		Flags:           io.Flags,
+		Dev:             io.Dev,
+		Major:           maj,
+		Minor:           min,
+		Name:            string(io.Name[:nlen]),
+		UUID:            string(io.UUID[:ulen]),
+		ActivePresent:   (io.Flags & DMActivePresentFlag) != 0,
+		InactivePresent: (io.Flags & DMInactivePresentFlag) != 0,
+	}, nil
 }
 
 // Query status; inactive=true sets DMStatusTableFlag. Returns raw target status lines joined with '\n'.
@@ -277,7 +314,7 @@ func (c *Control) TableStatus(name string, inactive bool) (string, error) {
 		if inactive {
 			io.Flags |= DMStatusTableFlag
 		}
-		if err := c.rawIoctl(cmdDMTableStatus, unsafe.Pointer(io)); err != nil {
+		if err := c.rawIoctl(DMTableStatusCMD, unsafe.Pointer(io)); err != nil {
 			// If buffer too small, try again with larger size.
 			if errors.Is(err, unix.ENOSPC) || errors.Is(err, unix.EINVAL) {
 				bufSz *= 2
@@ -285,9 +322,9 @@ func (c *Control) TableStatus(name string, inactive bool) (string, error) {
 			}
 			return "", fmt.Errorf("dm table status '%s': %w", name, err)
 		}
-		// Parse status strings from payload: [dm_target_spec][status-string+NUL][pad] ...
-		headerSize := int(unsafe.Sizeof(dmIoctl{}))
-		i := headerSize
+		// Parse status strings from payload: sequence of
+		//   [dm_target_spec][status-string+NUL][padding...] ; next at spec.Next offset
+		i := int(io.DataStart)
 		end := int(io.DataSize)
 		if end == 0 || end > len(buf) {
 			end = len(buf)
@@ -295,6 +332,7 @@ func (c *Control) TableStatus(name string, inactive bool) (string, error) {
 		var out []byte
 		first := true
 		for i+int(unsafe.Sizeof(dmTargetSpec{})) <= end {
+			start := i
 			spec := (*dmTargetSpec)(unsafe.Pointer(&buf[i]))
 			i += int(unsafe.Sizeof(dmTargetSpec{}))
 			// read NUL-terminated string starting at i
@@ -307,15 +345,19 @@ func (c *Control) TableStatus(name string, inactive bool) (string, error) {
 			}
 			first = false
 			out = append(out, buf[i:j]...)
-			// advance to 8-byte boundary from start of spec
-			rel := j - (i - int(unsafe.Sizeof(dmTargetSpec{}))) + 1 // include NUL
-			pad := ((rel + 7) &^ 7) - rel
-			i = j + 1 + pad
 			if spec.Next == 0 {
 				break
 			}
+			// advance by kernel-provided offset to next spec
+			i = start + int(spec.Next)
 		}
 		return string(out), nil
 	}
 	return "", fmt.Errorf("dm table status '%s': insufficient buffer after retries", name)
 }
+
+func ioc(dir, typ, nr, size uintptr) uintptr {
+	return (dir << iocDirShift) | (typ << iocTypeShift) | (nr << iocNRShift) | (size << iocSizeShift)
+}
+
+func iowr(typ, nr, size uintptr) uintptr { return ioc(iocRead|iocWrite, typ, nr, size) }

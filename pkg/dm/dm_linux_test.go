@@ -109,9 +109,6 @@ func TestDMSuspendNoFlush(t *testing.T) {
 	if err := c.SuspendDevice(name, false); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
-	if err := c.SuspendDeviceNoFlush(name); err != nil {
-		t.Fatalf("Suspend(noflush): %v", err)
-	}
 	if err := c.RemoveDevice(name); err != nil {
 		t.Fatalf("RemoveDevice: %v", err)
 	}
