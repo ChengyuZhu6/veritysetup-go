@@ -202,3 +202,221 @@ func TestSuperBlockAgainstVeritySetup(t *testing.T) {
 		}
 	}
 }
+
+func TestSuperblockErrorHandling(t *testing.T) {
+	t.Run("DeserializeEmptyData", func(t *testing.T) {
+		_, err := DeserializeSuperblock([]byte{})
+		if err == nil {
+			t.Error("Expected error for empty data, got nil")
+		}
+	})
+
+	t.Run("DeserializePartialData", func(t *testing.T) {
+		partialData := make([]byte, VeritySuperblockSize/2)
+		_, err := DeserializeSuperblock(partialData)
+		if err == nil {
+			t.Error("Expected error for partial data, got nil")
+		}
+	})
+
+	t.Run("InvalidSignature", func(t *testing.T) {
+		data := make([]byte, VeritySuperblockSize)
+		copy(data, "INVALID!")
+		_, err := DeserializeSuperblock(data)
+		if err == nil {
+			t.Error("Expected error for invalid signature, got nil")
+		}
+	})
+
+	t.Run("UnsupportedVersion", func(t *testing.T) {
+		data := make([]byte, VeritySuperblockSize)
+		copy(data, VeritySignature)
+		data[8] = 99
+		_, err := DeserializeSuperblock(data)
+		if err == nil {
+			t.Error("Expected error for unsupported version, got nil")
+		}
+	})
+
+	t.Run("InvalidHashType", func(t *testing.T) {
+		sb := DefaultVeritySuperblock()
+		sb.HashType = 99
+		data, err := sb.Serialize()
+		if err != nil {
+			t.Errorf("Serialize failed: %v", err)
+		}
+		sb2, err := DeserializeSuperblock(data)
+		if err != nil {
+			t.Errorf("Deserialize failed: %v", err)
+		}
+		if sb2.HashType != 99 {
+			t.Errorf("Expected hash type 99, got %d", sb2.HashType)
+		}
+	})
+}
+
+func TestSuperblockBoundaryConditions(t *testing.T) {
+	t.Run("MinimalSuperblock", func(t *testing.T) {
+		sb := DefaultVeritySuperblock()
+		sb.DataBlockSize = 512
+		sb.HashBlockSize = 512
+		sb.DataBlocks = 1
+		sb.SaltSize = 0
+		copy(sb.Algorithm[:], "sha256")
+
+		data, err := sb.Serialize()
+		if err != nil {
+			t.Fatalf("Failed to serialize minimal superblock: %v", err)
+		}
+
+		sb2, err := DeserializeSuperblock(data)
+		if err != nil {
+			t.Fatalf("Failed to deserialize minimal superblock: %v", err)
+		}
+
+		if !reflect.DeepEqual(&sb, sb2) {
+			t.Error("Minimal superblock round trip failed")
+			t.Logf("Original: %+v", sb)
+			t.Logf("Deserialized: %+v", *sb2)
+		}
+	})
+
+	t.Run("MaxSaltSize", func(t *testing.T) {
+		sb := DefaultVeritySuperblock()
+		sb.SaltSize = 256
+		for i := 0; i < 256; i++ {
+			sb.Salt[i] = byte(i)
+		}
+
+		data, err := sb.Serialize()
+		if err != nil {
+			t.Fatalf("Failed to serialize superblock with max salt: %v", err)
+		}
+
+		sb2, err := DeserializeSuperblock(data)
+		if err != nil {
+			t.Fatalf("Failed to deserialize superblock with max salt: %v", err)
+		}
+
+		if sb2.SaltSize != 256 {
+			t.Errorf("Expected salt size 256, got %d", sb2.SaltSize)
+		}
+
+		for i := 0; i < 256; i++ {
+			if sb2.Salt[i] != byte(i) {
+				t.Errorf("Salt mismatch at index %d", i)
+			}
+		}
+	})
+
+	t.Run("LargeDataBlocks", func(t *testing.T) {
+		sb := DefaultVeritySuperblock()
+		sb.DataBlocks = 1<<32 - 1
+
+		data, err := sb.Serialize()
+		if err != nil {
+			t.Fatalf("Failed to serialize superblock with large data blocks: %v", err)
+		}
+
+		sb2, err := DeserializeSuperblock(data)
+		if err != nil {
+			t.Fatalf("Failed to deserialize superblock with large data blocks: %v", err)
+		}
+
+		if sb2.DataBlocks != sb.DataBlocks {
+			t.Errorf("DataBlocks mismatch: expected %d, got %d", sb.DataBlocks, sb2.DataBlocks)
+		}
+	})
+
+	t.Run("DifferentHashAlgorithms", func(t *testing.T) {
+		algorithms := []string{"sha1", "sha256", "sha512"}
+		for _, algo := range algorithms {
+			sb := DefaultVeritySuperblock()
+			for i := range sb.Algorithm {
+				sb.Algorithm[i] = 0
+			}
+			copy(sb.Algorithm[:], algo)
+
+			data, err := sb.Serialize()
+			if err != nil {
+				t.Fatalf("Failed to serialize superblock with %s: %v", algo, err)
+			}
+
+			sb2, err := DeserializeSuperblock(data)
+			if err != nil {
+				t.Fatalf("Failed to deserialize superblock with %s: %v", algo, err)
+			}
+
+			algoStr := string(bytes.TrimRight(sb2.Algorithm[:], "\x00"))
+			if algoStr != algo {
+				t.Errorf("Algorithm mismatch: expected %s, got %s", algo, algoStr)
+			}
+		}
+	})
+}
+
+func TestNewSuperblock(t *testing.T) {
+	sb := NewSuperblock()
+	if sb == nil {
+		t.Fatal("NewSuperblock() returned nil")
+	}
+
+	if string(sb.Signature[:]) != VeritySignature {
+		t.Errorf("Expected signature %s, got %s", VeritySignature, string(sb.Signature[:]))
+	}
+
+	if sb.Version != 1 {
+		t.Errorf("Expected version 1, got %d", sb.Version)
+	}
+
+	if sb.HashType != 1 {
+		t.Errorf("Expected hash type 1, got %d", sb.HashType)
+	}
+}
+
+func TestAdoptParamsFromSuperblock(t *testing.T) {
+	sb := DefaultVeritySuperblock()
+	sb.DataBlockSize = 8192
+	sb.HashBlockSize = 4096
+	sb.DataBlocks = 1000
+	sb.SaltSize = 16
+	copy(sb.Algorithm[:], "sha512")
+	for i := 0; i < 16; i++ {
+		sb.Salt[i] = byte(i)
+	}
+
+	params := &VerityParams{}
+	if err := AdoptParamsFromSuperblock(params, &sb); err != nil {
+		t.Fatalf("AdoptParamsFromSuperblock failed: %v", err)
+	}
+
+	if params.HashName != "sha512" {
+		t.Errorf("Expected hash name 'sha512', got '%s'", params.HashName)
+	}
+
+	if params.DataBlockSize != 8192 {
+		t.Errorf("Expected data block size 8192, got %d", params.DataBlockSize)
+	}
+
+	if params.HashBlockSize != 4096 {
+		t.Errorf("Expected hash block size 4096, got %d", params.HashBlockSize)
+	}
+
+	if params.DataBlocks != 1000 {
+		t.Errorf("Expected data blocks 1000, got %d", params.DataBlocks)
+	}
+
+	if params.SaltSize != 16 {
+		t.Errorf("Expected salt size 16, got %d", params.SaltSize)
+	}
+
+	if len(params.Salt) != 16 {
+		t.Errorf("Expected salt length 16, got %d", len(params.Salt))
+	}
+
+	for i := 0; i < 16; i++ {
+		if params.Salt[i] != byte(i) {
+			t.Errorf("Salt mismatch at index %d: expected %d, got %d", i, i, params.Salt[i])
+		}
+	}
+}

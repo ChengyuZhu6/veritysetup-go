@@ -109,9 +109,4 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "  --data-blocks <n>                  Data blocks (override device size)\n")
 	fmt.Fprintf(os.Stderr, "  --no-superblock                    Hash device has no superblock\n")
 	fmt.Fprintf(os.Stderr, "  --hash-offset <bytes>              Hash area offset (when --no-superblock)\n")
-	fmt.Fprintf(os.Stderr, "  --ignore-corruption|--restart-on-corruption|--panic-on-corruption|--error-as-corruption\n")
-	fmt.Fprintf(os.Stderr, "  --ignore-zero-blocks               Do not verify zeroed blocks\n")
-	fmt.Fprintf(os.Stderr, "  --check-at-most-once               Verify each block at most once\n")
-	fmt.Fprintf(os.Stderr, "  --use-tasklets                     Use kernel tasklets\n")
-	fmt.Fprintf(os.Stderr, "  --shared                           Share data device with another verity segment\n")
 }

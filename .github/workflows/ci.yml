@@ -39,6 +39,9 @@ jobs:
       - name: Run unit tests (race)
         run: sudo -E go test -v -race ./...
 
+      - name: Run integration tests
+        run: sudo -E bash tests/verity-compat.sh
+
   golangci:
     name: Lint
     runs-on: ubuntu-24.04
