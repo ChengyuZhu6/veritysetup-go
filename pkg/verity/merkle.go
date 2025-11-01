@@ -8,7 +8,10 @@ import (
 	_ "crypto/sha512"
 	"fmt"
 	"io"
+	"log"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 type VerityHash struct {
@@ -51,11 +54,41 @@ func NewVerityHash(p *VerityParams, dataDevice, hashDevice string, rootHash []by
 }
 
 func (vh *VerityHash) Verify() error {
+	if err := vh.validateParams(); err != nil {
+		return err
+	}
 	return vh.createOrVerifyHash(true)
 }
 
 func (vh *VerityHash) Create() error {
+	if err := vh.validateParams(); err != nil {
+		return err
+	}
 	return vh.createOrVerifyHash(false)
+}
+
+func (vh *VerityHash) validateParams() error {
+	if vh.params.SaltSize > 256 {
+		return fmt.Errorf("salt size %d exceeds maximum of 256 bytes", vh.params.SaltSize)
+	}
+
+	digestSize := vh.hashFunc.Size()
+	if digestSize > VerityMaxDigestSize {
+		return fmt.Errorf("digest size %d exceeds maximum of %d bytes", digestSize, VerityMaxDigestSize)
+	}
+
+	if uint64MultOverflow(vh.params.DataBlocks, uint64(vh.params.DataBlockSize)) {
+		return fmt.Errorf("data device offset overflow: %d blocks * %d bytes",
+			vh.params.DataBlocks, vh.params.DataBlockSize)
+	}
+
+	pageSize := uint32(unix.Getpagesize())
+	if vh.params.DataBlockSize > pageSize {
+		log.Printf("WARNING: Kernel cannot activate device if data block size (%d) exceeds page size (%d)",
+			vh.params.DataBlockSize, pageSize)
+	}
+
+	return nil
 }
 
 func (vh *VerityHash) calculateHashLevels() ([]hashTreeLevel, error) {
@@ -112,6 +145,17 @@ func (vh *VerityHash) verifyHashBlock(data, salt []byte) ([]byte, error) {
 		}
 	}
 	return h.Sum(nil), nil
+}
+
+func uint64MultOverflow(a uint64, b uint64) bool {
+	if b == 0 {
+		return false
+	}
+	result := a * b
+	if result/b != a {
+		return true
+	}
+	return false
 }
 
 func readBlock(f *os.File, offset uint64, size uint32) ([]byte, error) {

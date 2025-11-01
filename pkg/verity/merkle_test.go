@@ -798,3 +798,151 @@ func TestUnsupportedHashAlgorithm(t *testing.T) {
 		t.Errorf("Verify failed: %v", err)
 	}
 }
+
+func TestParamValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	dataPath := filepath.Join(tmpDir, "data.img")
+	hashPath := filepath.Join(tmpDir, "hash.img")
+	dataSize := uint64(1024 * 1024)
+
+	t.Run("ExcessiveSaltSize", func(t *testing.T) {
+		params := &VerityParams{
+			HashName:       "sha256",
+			DataBlockSize:  4096,
+			HashBlockSize:  4096,
+			DataBlocks:     dataSize / 4096,
+			HashType:       1,
+			Salt:           make([]byte, 257), // Exceeds maximum of 256
+			SaltSize:       257,
+			HashAreaOffset: 4096,
+		}
+
+		if err := setupTestData(dataPath, hashPath, params, dataSize); err != nil {
+			t.Fatalf("setupTestData failed: %v", err)
+		}
+
+		vh := NewVerityHash(params, dataPath, hashPath, nil)
+		err := vh.Create()
+		if err == nil {
+			t.Error("Expected error for salt size > 256, got nil")
+		}
+		if err != nil && !contains(err.Error(), "salt size") {
+			t.Errorf("Expected salt size error, got: %v", err)
+		}
+	})
+
+	t.Run("DataBlockSizeExceedsPageSize", func(t *testing.T) {
+		largeBlockSize := uint32(64 * 1024)
+
+		params := &VerityParams{
+			HashName:       "sha256",
+			DataBlockSize:  largeBlockSize,
+			HashBlockSize:  largeBlockSize,
+			DataBlocks:     16,
+			HashType:       1,
+			Salt:           []byte("test"),
+			SaltSize:       4,
+			HashAreaOffset: uint64(largeBlockSize),
+		}
+
+		largeDataSize := uint64(largeBlockSize) * 16
+		if err := setupTestData(dataPath, hashPath, params, largeDataSize); err != nil {
+			t.Fatalf("setupTestData failed: %v", err)
+		}
+
+		vh := NewVerityHash(params, dataPath, hashPath, nil)
+		if err := vh.Create(); err != nil {
+			t.Errorf("Create should succeed with warning, got error: %v", err)
+		}
+	})
+
+	t.Run("ValidSaltSize", func(t *testing.T) {
+		params := &VerityParams{
+			HashName:       "sha256",
+			DataBlockSize:  4096,
+			HashBlockSize:  4096,
+			DataBlocks:     dataSize / 4096,
+			HashType:       1,
+			Salt:           make([]byte, 256),
+			SaltSize:       256,
+			HashAreaOffset: 4096,
+		}
+
+		if err := setupTestData(dataPath, hashPath, params, dataSize); err != nil {
+			t.Fatalf("setupTestData failed: %v", err)
+		}
+
+		vh := NewVerityHash(params, dataPath, hashPath, nil)
+		if err := vh.Create(); err != nil {
+			t.Errorf("Create failed with valid salt size 256: %v", err)
+		}
+	})
+
+	t.Run("DigestSizeCheck", func(t *testing.T) {
+		hashAlgos := []string{"sha256", "sha512", "sha1"}
+
+		for _, algo := range hashAlgos {
+			params := &VerityParams{
+				HashName:       algo,
+				DataBlockSize:  4096,
+				HashBlockSize:  4096,
+				DataBlocks:     dataSize / 4096,
+				HashType:       1,
+				Salt:           []byte("test"),
+				SaltSize:       4,
+				HashAreaOffset: 4096,
+			}
+
+			if err := setupTestData(dataPath, hashPath, params, dataSize); err != nil {
+				t.Fatalf("setupTestData failed for %s: %v", algo, err)
+			}
+
+			vh := NewVerityHash(params, dataPath, hashPath, nil)
+			if err := vh.Create(); err != nil {
+				t.Errorf("Create failed for %s (digest size check): %v", algo, err)
+			}
+		}
+	})
+
+	t.Run("MaxLevelsCheck", func(t *testing.T) {
+		if VerityMaxLevels != 63 {
+			t.Errorf("Expected VerityMaxLevels to be 63, got %d", VerityMaxLevels)
+		}
+
+		params := &VerityParams{
+			HashName:       "sha256",
+			DataBlockSize:  4096,
+			HashBlockSize:  4096,
+			DataBlocks:     1000000,
+			HashType:       1,
+			Salt:           []byte("test"),
+			SaltSize:       4,
+			HashAreaOffset: 4096,
+		}
+
+		vh := NewVerityHash(params, dataPath, hashPath, nil)
+		levels, err := vh.calculateHashLevels()
+		if err != nil {
+			t.Errorf("calculateHashLevels failed for reasonable config: %v", err)
+		}
+		if len(levels) >= VerityMaxLevels {
+			t.Errorf("Reasonable config exceeded max levels: got %d levels", len(levels))
+		}
+		t.Logf("1 million blocks requires %d levels (max is %d)", len(levels), VerityMaxLevels)
+	})
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
+		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
+			findSubstring(s, substr)))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

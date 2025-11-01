@@ -12,6 +12,7 @@ const (
 	VeritySuperblockSize = 512
 	VerityMaxHashType    = 1
 	VerityMaxLevels      = 63
+	VerityMaxDigestSize  = 1024
 	MaxSaltSize          = 256
 )
 
