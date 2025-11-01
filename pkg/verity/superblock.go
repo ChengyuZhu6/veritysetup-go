@@ -303,7 +303,13 @@ func adoptParamsFromSuperblock(p *VerityParams, sb *VeritySuperblock, sbOffset u
 		return fmt.Errorf("verity: UUID mismatch")
 	}
 	p.NoSuperblock = false
-	p.HashAreaOffset = sbOffset
+	// HashAreaOffset should point to where the hash tree starts (after superblock)
+	// If sbOffset is 0, hash tree starts at hashBlockSize
+	if sbOffset == 0 {
+		p.HashAreaOffset = uint64(p.HashBlockSize)
+	} else {
+		p.HashAreaOffset = sbOffset
+	}
 	return nil
 }
 

@@ -197,8 +197,6 @@ func VerityHashBlocks(params *VerityParams, digestSize int) (uint64, error) {
 	return hashPosition, nil
 }
 
-// HashOffsetBlock calculates hash offset in hash blocks.
-// This corresponds to VERITY_hash_offset_block in verity.c
 func HashOffsetBlock(params *VerityParams) uint64 {
 	hashOffset := params.HashAreaOffset
 
@@ -206,23 +204,17 @@ func HashOffsetBlock(params *VerityParams) uint64 {
 		return hashOffset / uint64(params.HashBlockSize)
 	}
 
-	// Add superblock size and align to hash block size
 	hashOffset += VeritySuperblockSize
 	hashOffset += uint64(params.HashBlockSize) - 1
 
 	return hashOffset / uint64(params.HashBlockSize)
 }
 
-// GenerateUUID generates a new UUID string for verity device.
-// This corresponds to VERITY_UUID_generate in verity.c
 func GenerateUUID() (string, error) {
 	newUUID := uuid.New()
 	return newUUID.String(), nil
 }
 
-// ReadVeritySuperblock reads verity superblock from a device at specified offset
-// and populates the params structure.
-// This corresponds to VERITY_read_sb in verity.c
 func ReadVeritySuperblock(device io.ReaderAt, sbOffset uint64, params *VerityParams) (string, error) {
 	if params == nil {
 		return "", errors.New("verity: nil params")
@@ -241,12 +233,10 @@ func ReadVeritySuperblock(device io.ReaderAt, sbOffset uint64, params *VerityPar
 		return "", err
 	}
 
-	// Adopt parameters from superblock
 	if err := AdoptParamsFromSuperblock(params, sb, sbOffset); err != nil {
 		return "", err
 	}
 
-	// Return UUID string
 	uuidStr, err := sb.UUIDString()
 	if err != nil {
 		return "", err
@@ -255,8 +245,6 @@ func ReadVeritySuperblock(device io.ReaderAt, sbOffset uint64, params *VerityPar
 	return uuidStr, nil
 }
 
-// WriteSuperblock writes verity superblock to a device at specified offset.
-// This corresponds to VERITY_write_sb in verity.c
 func WriteSuperblock(device io.WriterAt, sbOffset uint64, uuidString string, params *VerityParams) error {
 	if params == nil {
 		return errors.New("verity: nil params")
@@ -270,22 +258,18 @@ func WriteSuperblock(device io.WriterAt, sbOffset uint64, uuidString string, par
 		return errors.New("verity: UUID required")
 	}
 
-	// Parse UUID
 	parsedUUID, err := uuid.Parse(uuidString)
 	if err != nil {
 		return fmt.Errorf("verity: wrong UUID format: %w", err)
 	}
 
-	// Set UUID in params
 	copy(params.UUID[:], parsedUUID[:])
 
-	// Build superblock from params
 	sb, err := BuildSuperblockFromParams(params)
 	if err != nil {
 		return err
 	}
 
-	// Write superblock
 	if err := sb.WriteSuperblock(device, sbOffset); err != nil {
 		return fmt.Errorf("verity: error during update of verity header: %w", err)
 	}
@@ -293,8 +277,6 @@ func WriteSuperblock(device io.WriterAt, sbOffset uint64, uuidString string, par
 	return nil
 }
 
-// VerifyParams verifies verity parameters and optionally performs userspace verification.
-// This corresponds to VERITY_verify_params in verity.c
 func VerifyParams(params *VerityParams, dataDevice, hashDevice string, rootHash []byte, checkHash bool) error {
 	if params == nil {
 		return errors.New("verity: nil params")
@@ -307,13 +289,11 @@ func VerifyParams(params *VerityParams, dataDevice, hashDevice string, rootHash 
 	log.Printf("Verifying VERITY device using hash %s", params.HashName)
 
 	if !checkHash {
-		// No userspace verification requested
 		return nil
 	}
 
 	log.Printf("Verification of VERITY data in userspace required")
 
-	// Perform userspace verification
 	verifier, err := NewVerifier(params, dataDevice, hashDevice, rootHash)
 	if err != nil {
 		return err
@@ -327,8 +307,6 @@ func VerifyParams(params *VerityParams, dataDevice, hashDevice string, rootHash 
 	return nil
 }
 
-// DumpInfo dumps verity device information.
-// This corresponds to VERITY_dump in verity.c
 func DumpInfo(params *VerityParams, rootHash []byte) (string, error) {
 	if params == nil {
 		return "", errors.New("verity: nil params")
@@ -374,7 +352,6 @@ func DumpInfo(params *VerityParams, rootHash []byte) (string, error) {
 	return sb.String(), nil
 }
 
-// getHashSize returns the digest size for a given hash algorithm name.
 func getHashSize(hashName string) int {
 	hashMap := map[string]crypto.Hash{
 		"sha1":   crypto.SHA1,
@@ -401,12 +378,13 @@ func HighLevelVerify(params *VerityParams, dataDevice, hashDevice string, rootHa
 		}
 		defer hashFile.Close()
 
-		sb, err := ReadSuperblock(hashFile, params.HashAreaOffset)
+		// Superblock is always at offset 0
+		sb, err := ReadSuperblock(hashFile, 0)
 		if err != nil {
 			return err
 		}
 
-		if err := AdoptParamsFromSuperblock(params, sb, params.HashAreaOffset); err != nil {
+		if err := AdoptParamsFromSuperblock(params, sb, 0); err != nil {
 			return err
 		}
 	}

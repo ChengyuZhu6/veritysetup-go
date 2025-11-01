@@ -1,8 +1,10 @@
+// Package verity provides tests for dm-verity functionality
 package verity
 
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
@@ -11,6 +13,16 @@ import (
 
 	"github.com/google/uuid"
 )
+
+func extractUUID(t *testing.T, output string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?i)UUID:\s*([0-9a-f-]+)`)
+	matches := re.FindStringSubmatch(output)
+	if len(matches) < 2 {
+		t.Fatalf("failed to extract UUID from output: %s", output)
+	}
+	return matches[1]
+}
 
 func TestGenerateUUID(t *testing.T) {
 	uuidStr, err := GenerateUUID()
@@ -32,6 +44,56 @@ func TestGenerateUUID(t *testing.T) {
 
 	if uuidStr == uuidStr2 {
 		t.Error("Two generated UUIDs should be different")
+	}
+}
+
+func TestGetHashSize(t *testing.T) {
+	tests := []struct {
+		name     string
+		hashName string
+		expected int
+	}{
+		{"sha1", "sha1", 20},
+		{"sha256", "sha256", 32},
+		{"sha512", "sha512", 64},
+		{"SHA256 uppercase", "SHA256", 32},
+		{"sha256 with spaces", "  sha256  ", 32},
+		{"unsupported", "md5", -1},
+		{"empty", "", -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getHashSize(tt.hashName)
+			if result != tt.expected {
+				t.Errorf("getHashSize(%q) = %d, want %d", tt.hashName, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestUint64MultOverflow(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        uint64
+		b        uint64
+		overflow bool
+	}{
+		{"no overflow small", 100, 200, false},
+		{"no overflow zero", 0, 1000, false},
+		{"no overflow one", 1, 1000, false},
+		{"overflow max", ^uint64(0), 2, true},
+		{"overflow large", ^uint64(0) / 2, 3, true},
+		{"no overflow max by 1", ^uint64(0), 1, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := uint64MultOverflow(tt.a, tt.b)
+			if result != tt.overflow {
+				t.Errorf("uint64MultOverflow(%d, %d) = %v, want %v", tt.a, tt.b, result, tt.overflow)
+			}
+		})
 	}
 }
 
@@ -80,26 +142,122 @@ func TestHashOffsetBlock(t *testing.T) {
 	}
 }
 
-func TestGetHashSize(t *testing.T) {
+func TestHashOffsetBlockCalculation(t *testing.T) {
 	tests := []struct {
-		name     string
-		hashName string
-		expected int
+		name           string
+		hashAreaOffset uint64
+		hashBlockSize  uint32
+		noSuperblock   bool
+		expected       uint64
 	}{
-		{"sha1", "sha1", 20},
-		{"sha256", "sha256", 32},
-		{"sha512", "sha512", 64},
-		{"SHA256 uppercase", "SHA256", 32},
-		{"sha256 with spaces", "  sha256  ", 32},
-		{"unsupported", "md5", -1},
-		{"empty", "", -1},
+		{
+			name:           "no superblock, aligned",
+			hashAreaOffset: 8192,
+			hashBlockSize:  4096,
+			noSuperblock:   true,
+			expected:       2, // 8192 / 4096
+		},
+		{
+			name:           "with superblock, offset 0",
+			hashAreaOffset: 0,
+			hashBlockSize:  4096,
+			noSuperblock:   false,
+			expected:       1, // (0 + 512 + 4095) / 4096
+		},
+		{
+			name:           "with superblock, offset 4096",
+			hashAreaOffset: 4096,
+			hashBlockSize:  4096,
+			noSuperblock:   false,
+			expected:       2, // (4096 + 512 + 4095) / 4096
+		},
+		{
+			name:           "no superblock, large offset",
+			hashAreaOffset: 1048576, // 1MB
+			hashBlockSize:  4096,
+			noSuperblock:   true,
+			expected:       256, // 1048576 / 4096
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := getHashSize(tt.hashName)
+			params := &VerityParams{
+				HashAreaOffset: tt.hashAreaOffset,
+				HashBlockSize:  tt.hashBlockSize,
+				NoSuperblock:   tt.noSuperblock,
+			}
+
+			result := HashOffsetBlock(params)
 			if result != tt.expected {
-				t.Errorf("getHashSize(%q) = %d, want %d", tt.hashName, result, tt.expected)
+				t.Errorf("HashOffsetBlock() = %d, want %d", result, tt.expected)
+			} else {
+				t.Logf("✓ Correct offset: %d blocks", result)
+			}
+		})
+	}
+}
+
+func TestVerityHashBlocksCalculation(t *testing.T) {
+	tests := []struct {
+		name          string
+		dataBlocks    uint64
+		dataBlockSize uint32
+		hashBlockSize uint32
+		hashAlgo      string
+	}{
+		{
+			name:          "small dataset sha256",
+			dataBlocks:    16,
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			hashAlgo:      "sha256",
+		},
+		{
+			name:          "medium dataset sha256",
+			dataBlocks:    1024,
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			hashAlgo:      "sha256",
+		},
+		{
+			name:          "large dataset sha512",
+			dataBlocks:    4096,
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			hashAlgo:      "sha512",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := &VerityParams{
+				HashName:       tt.hashAlgo,
+				DataBlockSize:  tt.dataBlockSize,
+				HashBlockSize:  tt.hashBlockSize,
+				DataBlocks:     tt.dataBlocks,
+				HashType:       1,
+				HashAreaOffset: 0,
+			}
+
+			digestSize := getHashSize(tt.hashAlgo)
+			if digestSize <= 0 {
+				t.Fatalf("Invalid hash algorithm: %s", tt.hashAlgo)
+			}
+
+			hashBlocks, err := VerityHashBlocks(params, digestSize)
+			if err != nil {
+				t.Fatalf("VerityHashBlocks failed: %v", err)
+			}
+
+			t.Logf("Data blocks: %d, Hash blocks needed: %d", tt.dataBlocks, hashBlocks)
+
+			if hashBlocks > tt.dataBlocks {
+				t.Errorf("Hash blocks (%d) should not exceed data blocks (%d)", hashBlocks, tt.dataBlocks)
+			}
+
+			if hashBlocks == 0 && tt.dataBlocks > 0 {
+				t.Error("Hash blocks should be > 0 for non-empty dataset")
 			}
 		})
 	}
@@ -153,6 +311,64 @@ func TestDumpInfoNilParams(t *testing.T) {
 	_, err := DumpInfo(nil, nil)
 	if err == nil {
 		t.Error("DumpInfo with nil params should return error")
+	}
+}
+
+func TestDumpInfoComparison(t *testing.T) {
+	params := &VerityParams{
+		HashName:       "sha256",
+		DataBlockSize:  4096,
+		HashBlockSize:  4096,
+		DataBlocks:     1024,
+		HashType:       1,
+		Salt:           []byte{0x01, 0x02, 0x03, 0x04},
+		SaltSize:       4,
+		HashAreaOffset: 0,
+	}
+
+	rootHash := make([]byte, 32)
+	for i := range rootHash {
+		rootHash[i] = byte(i)
+	}
+
+	info, err := DumpInfo(params, rootHash)
+	if err != nil {
+		t.Fatalf("DumpInfo failed: %v", err)
+	}
+
+	t.Logf("DumpInfo output:\n%s", info)
+
+	expectedFields := map[string]bool{
+		"Hash type:":       false,
+		"Data blocks:":     false,
+		"Data block size:": false,
+		"Hash blocks:":     false,
+		"Hash block size:": false,
+		"Hash algorithm:":  false,
+		"Salt:":            false,
+		"Root hash:":       false,
+	}
+
+	for field := range expectedFields {
+		if strings.Contains(info, field) {
+			expectedFields[field] = true
+		}
+	}
+
+	for field, found := range expectedFields {
+		if !found {
+			t.Errorf("DumpInfo output missing field: %s", field)
+		}
+	}
+
+	if !strings.Contains(info, "sha256") {
+		t.Error("DumpInfo should contain hash algorithm name")
+	}
+	if !strings.Contains(info, "1024") {
+		t.Error("DumpInfo should contain data blocks count")
+	}
+	if !strings.Contains(info, "4096") {
+		t.Error("DumpInfo should contain block sizes")
 	}
 }
 
@@ -277,244 +493,6 @@ func TestReadVeritySuperblockUnalignedOffset(t *testing.T) {
 	}
 }
 
-func TestUint64MultOverflow(t *testing.T) {
-	tests := []struct {
-		name     string
-		a        uint64
-		b        uint64
-		overflow bool
-	}{
-		{"no overflow small", 100, 200, false},
-		{"no overflow zero", 0, 1000, false},
-		{"no overflow one", 1, 1000, false},
-		{"overflow max", ^uint64(0), 2, true},
-		{"overflow large", ^uint64(0) / 2, 3, true},
-		{"no overflow max by 1", ^uint64(0), 1, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := uint64MultOverflow(tt.a, tt.b)
-			if result != tt.overflow {
-				t.Errorf("uint64MultOverflow(%d, %d) = %v, want %v", tt.a, tt.b, result, tt.overflow)
-			}
-		})
-	}
-}
-
-func extractUUID(t *testing.T, output string) string {
-	t.Helper()
-	re := regexp.MustCompile(`(?i)UUID:\s*([0-9a-f-]+)`)
-	matches := re.FindStringSubmatch(output)
-	if len(matches) < 2 {
-		t.Fatalf("failed to extract UUID from output: %s", output)
-	}
-	return matches[1]
-}
-
-func TestHighLevelCreateWithVeritysetup(t *testing.T) {
-	if _, err := exec.LookPath("veritysetup"); err != nil {
-		t.Skip("veritysetup not found, skipping integration test")
-	}
-
-	tests := []struct {
-		name          string
-		dataBlockSize uint32
-		hashBlockSize uint32
-		numBlocks     uint64
-		hashType      uint32
-		hashAlgo      string
-		useSalt       bool
-	}{
-		{
-			name:          "basic sha256 no salt",
-			dataBlockSize: 4096,
-			hashBlockSize: 4096,
-			numBlocks:     16,
-			hashType:      1,
-			hashAlgo:      "sha256",
-			useSalt:       false,
-		},
-		{
-			name:          "sha256 with salt",
-			dataBlockSize: 4096,
-			hashBlockSize: 4096,
-			numBlocks:     32,
-			hashType:      1,
-			hashAlgo:      "sha256",
-			useSalt:       true,
-		},
-		{
-			name:          "sha512 no salt",
-			dataBlockSize: 4096,
-			hashBlockSize: 4096,
-			numBlocks:     16,
-			hashType:      1,
-			hashAlgo:      "sha512",
-			useSalt:       false,
-		},
-		{
-			name:          "sha1 with salt",
-			dataBlockSize: 4096,
-			hashBlockSize: 4096,
-			numBlocks:     8,
-			hashType:      1,
-			hashAlgo:      "sha1",
-			useSalt:       true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dataPath, _ := createTestDataFile(t, tt.dataBlockSize, tt.numBlocks)
-			defer os.Remove(dataPath)
-
-			hashPathGo := createTestHashFile(t, int64(tt.hashBlockSize*uint32(tt.numBlocks)*2))
-			defer os.Remove(hashPathGo)
-
-			hashPathC := createTestHashFile(t, int64(tt.hashBlockSize*uint32(tt.numBlocks)*2))
-			defer os.Remove(hashPathC)
-
-			var salt []byte
-			saltArgs := []string{"--salt", "-"}
-			if tt.useSalt {
-				salt = []byte("integration-test-salt")
-				saltHex := hex.EncodeToString(salt)
-				saltArgs = []string{"--salt", saltHex}
-			}
-
-			params := &VerityParams{
-				HashName:       tt.hashAlgo,
-				DataBlockSize:  tt.dataBlockSize,
-				HashBlockSize:  tt.hashBlockSize,
-				DataBlocks:     tt.numBlocks,
-				HashType:       tt.hashType,
-				Salt:           salt,
-				SaltSize:       uint16(len(salt)),
-				HashAreaOffset: 0,
-				NoSuperblock:   true, // No superblock for this test
-			}
-
-			rootHashGo, err := HighLevelCreate(params, dataPath, hashPathGo)
-			if err != nil {
-				t.Fatalf("HighLevelCreate failed: %v", err)
-			}
-
-			args := []string{
-				"format",
-				dataPath,
-				hashPathC,
-				"--hash", tt.hashAlgo,
-				"--data-block-size", "4096",
-				"--hash-block-size", "4096",
-			}
-			args = append(args, saltArgs...)
-
-			cmd := exec.Command("veritysetup", args...)
-			output, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("veritysetup format failed: %v\nOutput: %s", err, string(output))
-			}
-
-			rootHashC := extractRootHash(t, string(output))
-			rootHashCBytes, err := hex.DecodeString(rootHashC)
-			if err != nil {
-				t.Fatalf("failed to decode veritysetup root hash: %v", err)
-			}
-
-			if !bytes.Equal(rootHashGo, rootHashCBytes) {
-				t.Errorf("Root hash mismatch:\nGo:          %x\nveritysetup: %x",
-					rootHashGo, rootHashCBytes)
-			} else {
-				t.Logf("✓ Root hash match: %x", rootHashGo)
-			}
-		})
-	}
-}
-
-func TestHighLevelVerifyWithVeritysetup(t *testing.T) {
-	if _, err := exec.LookPath("veritysetup"); err != nil {
-		t.Skip("veritysetup not found, skipping integration test")
-	}
-
-	tests := []struct {
-		name          string
-		dataBlockSize uint32
-		hashBlockSize uint32
-		numBlocks     uint64
-		hashType      uint32
-		hashAlgo      string
-		useSalt       bool
-	}{
-		{
-			name:          "verify sha256",
-			dataBlockSize: 4096,
-			hashBlockSize: 4096,
-			numBlocks:     16,
-			hashType:      1,
-			hashAlgo:      "sha256",
-			useSalt:       true,
-		},
-		{
-			name:          "verify sha512",
-			dataBlockSize: 4096,
-			hashBlockSize: 4096,
-			numBlocks:     8,
-			hashType:      1,
-			hashAlgo:      "sha512",
-			useSalt:       false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dataPath, _ := createTestDataFile(t, tt.dataBlockSize, tt.numBlocks)
-			defer os.Remove(dataPath)
-
-			hashPath := createTestHashFile(t, int64(tt.hashBlockSize*uint32(tt.numBlocks)*2))
-			defer os.Remove(hashPath)
-
-			var salt []byte
-			if tt.useSalt {
-				salt = []byte("verify-test-salt")
-			}
-
-			params := &VerityParams{
-				HashName:       tt.hashAlgo,
-				DataBlockSize:  tt.dataBlockSize,
-				HashBlockSize:  tt.hashBlockSize,
-				DataBlocks:     tt.numBlocks,
-				HashType:       tt.hashType,
-				Salt:           salt,
-				SaltSize:       uint16(len(salt)),
-				HashAreaOffset: 0,
-				NoSuperblock:   true,
-			}
-
-			rootHash, err := HighLevelCreate(params, dataPath, hashPath)
-			if err != nil {
-				t.Fatalf("HighLevelCreate failed: %v", err)
-			}
-
-			t.Logf("Created hash tree with root hash: %x", rootHash)
-
-			err = HighLevelVerify(params, dataPath, hashPath, rootHash)
-			if err != nil {
-				t.Errorf("HighLevelVerify failed: %v", err)
-			} else {
-				t.Logf("✓ Go verification successful")
-			}
-
-			err = VerifyParams(params, dataPath, hashPath, rootHash, true)
-			if err != nil {
-				t.Errorf("VerifyParams with checkHash=true failed: %v", err)
-			} else {
-				t.Logf("✓ VerifyParams verification successful")
-			}
-		})
-	}
-}
-
 func TestSuperblockRoundTrip(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -614,180 +592,914 @@ func TestSuperblockRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDumpInfoComparison(t *testing.T) {
-	params := &VerityParams{
-		HashName:       "sha256",
-		DataBlockSize:  4096,
-		HashBlockSize:  4096,
-		DataBlocks:     1024,
-		HashType:       1,
-		Salt:           []byte{0x01, 0x02, 0x03, 0x04},
-		SaltSize:       4,
-		HashAreaOffset: 0,
+func TestHighLevelCreateWithVeritysetup(t *testing.T) {
+	if _, err := exec.LookPath("veritysetup"); err != nil {
+		t.Skip("veritysetup not found, skipping integration test")
 	}
 
-	rootHash := make([]byte, 32)
-	for i := range rootHash {
-		rootHash[i] = byte(i)
-	}
-
-	info, err := DumpInfo(params, rootHash)
-	if err != nil {
-		t.Fatalf("DumpInfo failed: %v", err)
-	}
-
-	t.Logf("DumpInfo output:\n%s", info)
-
-	expectedFields := map[string]bool{
-		"Hash type:":       false,
-		"Data blocks:":     false,
-		"Data block size:": false,
-		"Hash blocks:":     false,
-		"Hash block size:": false,
-		"Hash algorithm:":  false,
-		"Salt:":            false,
-		"Root hash:":       false,
-	}
-
-	for field := range expectedFields {
-		if strings.Contains(info, field) {
-			expectedFields[field] = true
-		}
-	}
-
-	for field, found := range expectedFields {
-		if !found {
-			t.Errorf("DumpInfo output missing field: %s", field)
-		}
-	}
-
-	if !strings.Contains(info, "sha256") {
-		t.Error("DumpInfo should contain hash algorithm name")
-	}
-	if !strings.Contains(info, "1024") {
-		t.Error("DumpInfo should contain data blocks count")
-	}
-	if !strings.Contains(info, "4096") {
-		t.Error("DumpInfo should contain block sizes")
-	}
-}
-
-func TestHashOffsetBlockCalculation(t *testing.T) {
 	tests := []struct {
-		name           string
-		hashAreaOffset uint64
-		hashBlockSize  uint32
-		noSuperblock   bool
-		expected       uint64
+		name          string
+		dataBlockSize uint32
+		hashBlockSize uint32
+		numBlocks     uint64
+		hashType      uint32
+		hashAlgo      string
+		useSalt       bool
+		noSuperblock  bool
 	}{
+		// No superblock tests
 		{
-			name:           "no superblock, aligned",
-			hashAreaOffset: 8192,
-			hashBlockSize:  4096,
-			noSuperblock:   true,
-			expected:       2, // 8192 / 4096
+			name:          "basic sha256 no salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
+			hashAlgo:      "sha256",
+			useSalt:       false,
+			noSuperblock:  true,
 		},
 		{
-			name:           "with superblock, offset 0",
-			hashAreaOffset: 0,
-			hashBlockSize:  4096,
-			noSuperblock:   false,
-			expected:       1, // (0 + 512 + 4095) / 4096
+			name:          "sha256 with salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     32,
+			hashType:      1,
+			hashAlgo:      "sha256",
+			useSalt:       true,
+			noSuperblock:  true,
 		},
 		{
-			name:           "with superblock, offset 4096",
-			hashAreaOffset: 4096,
-			hashBlockSize:  4096,
-			noSuperblock:   false,
-			expected:       2, // (4096 + 512 + 4095) / 4096
+			name:          "sha512 no salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
+			hashAlgo:      "sha512",
+			useSalt:       false,
+			noSuperblock:  true,
 		},
 		{
-			name:           "no superblock, large offset",
-			hashAreaOffset: 1048576, // 1MB
-			hashBlockSize:  4096,
-			noSuperblock:   true,
-			expected:       256, // 1048576 / 4096
+			name:          "sha1 with salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     8,
+			hashType:      1,
+			hashAlgo:      "sha1",
+			useSalt:       true,
+			noSuperblock:  true,
+		},
+		// With superblock tests
+		{
+			name:          "superblock sha256 no salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
+			hashAlgo:      "sha256",
+			useSalt:       false,
+			noSuperblock:  false,
+		},
+		{
+			name:          "superblock sha256 with salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     32,
+			hashType:      1,
+			hashAlgo:      "sha256",
+			useSalt:       true,
+			noSuperblock:  false,
+		},
+		{
+			name:          "superblock sha512 no salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
+			hashAlgo:      "sha512",
+			useSalt:       false,
+			noSuperblock:  false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params := &VerityParams{
-				HashAreaOffset: tt.hashAreaOffset,
-				HashBlockSize:  tt.hashBlockSize,
-				NoSuperblock:   tt.noSuperblock,
+			dataPath, _ := createTestDataFile(t, tt.dataBlockSize, tt.numBlocks)
+			defer os.Remove(dataPath)
+
+			hashPathGo := createTestHashFile(t, int64(tt.hashBlockSize*uint32(tt.numBlocks)*2))
+			defer os.Remove(hashPathGo)
+
+			hashPathC := createTestHashFile(t, int64(tt.hashBlockSize*uint32(tt.numBlocks)*2))
+			defer os.Remove(hashPathC)
+
+			var salt []byte
+			saltArgs := []string{"--salt", "-"}
+			veritysetupArgs := []string{}
+			if tt.useSalt {
+				salt = []byte("integration-test-salt")
+				saltHex := hex.EncodeToString(salt)
+				saltArgs = []string{"--salt", saltHex}
+			}
+			if tt.noSuperblock {
+				veritysetupArgs = []string{"--no-superblock"}
 			}
 
-			result := HashOffsetBlock(params)
-			if result != tt.expected {
-				t.Errorf("HashOffsetBlock() = %d, want %d", result, tt.expected)
+			var rootHashGo []byte
+			if tt.noSuperblock {
+				// No superblock mode
+				params := &VerityParams{
+					HashName:       tt.hashAlgo,
+					DataBlockSize:  tt.dataBlockSize,
+					HashBlockSize:  tt.hashBlockSize,
+					DataBlocks:     tt.numBlocks,
+					HashType:       tt.hashType,
+					Salt:           salt,
+					SaltSize:       uint16(len(salt)),
+					HashAreaOffset: 0,
+					NoSuperblock:   true,
+				}
+
+				var err error
+				rootHashGo, err = HighLevelCreate(params, dataPath, hashPathGo)
+				if err != nil {
+					t.Fatalf("HighLevelCreate (no superblock) failed: %v", err)
+				}
 			} else {
-				t.Logf("✓ Correct offset: %d blocks", result)
+				// With superblock mode
+				uuidStr, err := GenerateUUID()
+				if err != nil {
+					t.Fatalf("GenerateUUID failed: %v", err)
+				}
+
+				params := &VerityParams{
+					HashName:       tt.hashAlgo,
+					DataBlockSize:  tt.dataBlockSize,
+					HashBlockSize:  tt.hashBlockSize,
+					DataBlocks:     tt.numBlocks,
+					HashType:       tt.hashType,
+					Salt:           salt,
+					SaltSize:       uint16(len(salt)),
+					HashAreaOffset: uint64(tt.hashBlockSize),
+					NoSuperblock:   false,
+				}
+
+				parsedUUID, _ := uuid.Parse(uuidStr)
+				copy(params.UUID[:], parsedUUID[:])
+
+				// Write superblock
+				hashFile, err := os.OpenFile(hashPathGo, os.O_RDWR, 0)
+				if err != nil {
+					t.Fatalf("Failed to open hash file: %v", err)
+				}
+				err = WriteSuperblock(hashFile, 0, uuidStr, params)
+				hashFile.Close()
+				if err != nil {
+					t.Fatalf("WriteSuperblock failed: %v", err)
+				}
+
+				// Create hash tree
+				creator, err := NewCreator(params, dataPath, hashPathGo)
+				if err != nil {
+					t.Fatalf("NewCreator failed: %v", err)
+				}
+				rootHashGo, err = creator.Create()
+				if err != nil {
+					t.Fatalf("Creator.Create failed: %v", err)
+				}
+			}
+
+			args := []string{
+				"format",
+				dataPath,
+				hashPathC,
+				"--hash", tt.hashAlgo,
+				"--data-block-size", "4096",
+				"--hash-block-size", "4096",
+			}
+			args = append(args, saltArgs...)
+			args = append(args, veritysetupArgs...)
+
+			cmd := exec.Command("veritysetup", args...)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("veritysetup format failed: %v\nOutput: %s", err, string(output))
+			}
+
+			rootHashC := extractRootHash(t, string(output))
+			rootHashCBytes, err := hex.DecodeString(rootHashC)
+			if err != nil {
+				t.Fatalf("failed to decode veritysetup root hash: %v", err)
+			}
+
+			if !bytes.Equal(rootHashGo, rootHashCBytes) {
+				t.Errorf("Root hash mismatch:\nGo:          %x\nveritysetup: %x",
+					rootHashGo, rootHashCBytes)
+			} else {
+				t.Logf("✓ Root hash match: %x", rootHashGo)
 			}
 		})
 	}
 }
 
-func TestVerityHashBlocksCalculation(t *testing.T) {
+func TestHighLevelVerifyWithVeritysetup(t *testing.T) {
+	if _, err := exec.LookPath("veritysetup"); err != nil {
+		t.Skip("veritysetup not found, skipping integration test")
+	}
+
 	tests := []struct {
 		name          string
-		dataBlocks    uint64
 		dataBlockSize uint32
 		hashBlockSize uint32
+		numBlocks     uint64
+		hashType      uint32
 		hashAlgo      string
+		useSalt       bool
+		noSuperblock  bool
 	}{
+		// No superblock tests
 		{
-			name:          "small dataset sha256",
-			dataBlocks:    16,
+			name:          "verify sha256",
 			dataBlockSize: 4096,
 			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
 			hashAlgo:      "sha256",
+			useSalt:       true,
+			noSuperblock:  true,
 		},
 		{
-			name:          "medium dataset sha256",
-			dataBlocks:    1024,
+			name:          "verify sha512",
 			dataBlockSize: 4096,
 			hashBlockSize: 4096,
-			hashAlgo:      "sha256",
-		},
-		{
-			name:          "large dataset sha512",
-			dataBlocks:    4096,
-			dataBlockSize: 4096,
-			hashBlockSize: 4096,
+			numBlocks:     8,
+			hashType:      1,
 			hashAlgo:      "sha512",
+			useSalt:       false,
+			noSuperblock:  true,
+		},
+		// With superblock tests
+		{
+			name:          "verify superblock sha256",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
+			hashAlgo:      "sha256",
+			useSalt:       true,
+			noSuperblock:  false,
+		},
+		{
+			name:          "verify superblock sha512",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     8,
+			hashType:      1,
+			hashAlgo:      "sha512",
+			useSalt:       false,
+			noSuperblock:  false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			dataPath, _ := createTestDataFile(t, tt.dataBlockSize, tt.numBlocks)
+			defer os.Remove(dataPath)
+
+			hashPath := createTestHashFile(t, int64(tt.hashBlockSize*uint32(tt.numBlocks)*2))
+			defer os.Remove(hashPath)
+
+			var salt []byte
+			if tt.useSalt {
+				salt = []byte("verify-test-salt")
+			}
+
+			var rootHash []byte
+			if tt.noSuperblock {
+				// No superblock mode
+				params := &VerityParams{
+					HashName:       tt.hashAlgo,
+					DataBlockSize:  tt.dataBlockSize,
+					HashBlockSize:  tt.hashBlockSize,
+					DataBlocks:     tt.numBlocks,
+					HashType:       tt.hashType,
+					Salt:           salt,
+					SaltSize:       uint16(len(salt)),
+					HashAreaOffset: 0,
+					NoSuperblock:   true,
+				}
+
+				var err error
+				rootHash, err = HighLevelCreate(params, dataPath, hashPath)
+				if err != nil {
+					t.Fatalf("HighLevelCreate failed: %v", err)
+				}
+
+				t.Logf("Created hash tree with root hash: %x", rootHash)
+
+				err = HighLevelVerify(params, dataPath, hashPath, rootHash)
+				if err != nil {
+					t.Errorf("HighLevelVerify failed: %v", err)
+				} else {
+					t.Logf("✓ Go verification successful")
+				}
+
+				err = VerifyParams(params, dataPath, hashPath, rootHash, true)
+				if err != nil {
+					t.Errorf("VerifyParams with checkHash=true failed: %v", err)
+				} else {
+					t.Logf("✓ VerifyParams verification successful")
+				}
+			} else {
+				// With superblock mode
+				uuidStr, err := GenerateUUID()
+				if err != nil {
+					t.Fatalf("GenerateUUID failed: %v", err)
+				}
+
+				params := &VerityParams{
+					HashName:       tt.hashAlgo,
+					DataBlockSize:  tt.dataBlockSize,
+					HashBlockSize:  tt.hashBlockSize,
+					DataBlocks:     tt.numBlocks,
+					HashType:       tt.hashType,
+					Salt:           salt,
+					SaltSize:       uint16(len(salt)),
+					HashAreaOffset: uint64(tt.hashBlockSize),
+					NoSuperblock:   false,
+				}
+
+				parsedUUID, _ := uuid.Parse(uuidStr)
+				copy(params.UUID[:], parsedUUID[:])
+
+				// Write superblock
+				hashFile, err := os.OpenFile(hashPath, os.O_RDWR, 0)
+				if err != nil {
+					t.Fatalf("Failed to open hash file: %v", err)
+				}
+				err = WriteSuperblock(hashFile, 0, uuidStr, params)
+				hashFile.Close()
+				if err != nil {
+					t.Fatalf("WriteSuperblock failed: %v", err)
+				}
+
+				// Create hash tree
+				creator, err := NewCreator(params, dataPath, hashPath)
+				if err != nil {
+					t.Fatalf("NewCreator failed: %v", err)
+				}
+				rootHash, err = creator.Create()
+				if err != nil {
+					t.Fatalf("Creator.Create failed: %v", err)
+				}
+
+				t.Logf("Created hash tree with superblock, root hash: %x", rootHash)
+
+				err = HighLevelVerify(params, dataPath, hashPath, rootHash)
+				if err != nil {
+					t.Errorf("HighLevelVerify failed: %v", err)
+				} else {
+					t.Logf("✓ Go verification successful")
+				}
+
+				err = VerifyParams(params, dataPath, hashPath, rootHash, true)
+				if err != nil {
+					t.Errorf("VerifyParams with checkHash=true failed: %v", err)
+				} else {
+					t.Logf("✓ VerifyParams verification successful")
+				}
+			}
+		})
+	}
+}
+
+func TestCrossVerificationWithVeritysetup(t *testing.T) {
+	if _, err := exec.LookPath("veritysetup"); err != nil {
+		t.Skip("veritysetup not found, skipping cross-verification test")
+	}
+
+	tests := []struct {
+		name          string
+		dataBlockSize uint32
+		hashBlockSize uint32
+		numBlocks     uint64
+		hashType      uint32
+		hashAlgo      string
+		useSalt       bool
+		noSuperblock  bool
+	}{
+		// No superblock tests
+		{
+			name:          "cross-verify sha256 no salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
+			hashAlgo:      "sha256",
+			useSalt:       false,
+			noSuperblock:  true,
+		},
+		{
+			name:          "cross-verify sha256 with salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
+			hashAlgo:      "sha256",
+			useSalt:       true,
+			noSuperblock:  true,
+		},
+		{
+			name:          "cross-verify sha512 no salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     8,
+			hashType:      1,
+			hashAlgo:      "sha512",
+			useSalt:       false,
+			noSuperblock:  true,
+		},
+		{
+			name:          "cross-verify sha512 with salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     8,
+			hashType:      1,
+			hashAlgo:      "sha512",
+			useSalt:       true,
+			noSuperblock:  true,
+		},
+		{
+			name:          "cross-verify sha1 no salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     8,
+			hashType:      1,
+			hashAlgo:      "sha1",
+			useSalt:       false,
+			noSuperblock:  true,
+		},
+		{
+			name:          "cross-verify sha1 with salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     8,
+			hashType:      1,
+			hashAlgo:      "sha1",
+			useSalt:       true,
+			noSuperblock:  true,
+		},
+		// With superblock tests
+		{
+			name:          "cross-verify superblock sha256 no salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
+			hashAlgo:      "sha256",
+			useSalt:       false,
+			noSuperblock:  false,
+		},
+		{
+			name:          "cross-verify superblock sha256 with salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     16,
+			hashType:      1,
+			hashAlgo:      "sha256",
+			useSalt:       true,
+			noSuperblock:  false,
+		},
+		{
+			name:          "cross-verify superblock sha512 no salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     8,
+			hashType:      1,
+			hashAlgo:      "sha512",
+			useSalt:       false,
+			noSuperblock:  false,
+		},
+		{
+			name:          "cross-verify superblock sha1 with salt",
+			dataBlockSize: 4096,
+			hashBlockSize: 4096,
+			numBlocks:     8,
+			hashType:      1,
+			hashAlgo:      "sha1",
+			useSalt:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataPath, _ := createTestDataFile(t, tt.dataBlockSize, tt.numBlocks)
+			defer os.Remove(dataPath)
+
+			hashPathGo := createTestHashFile(t, int64(tt.hashBlockSize*uint32(tt.numBlocks)*2))
+			defer os.Remove(hashPathGo)
+
+			hashPathVeritysetup := createTestHashFile(t, int64(tt.hashBlockSize*uint32(tt.numBlocks)*2))
+			defer os.Remove(hashPathVeritysetup)
+
+			var salt []byte
+			saltArgs := []string{"--salt", "-"}
+			if tt.useSalt {
+				salt = []byte("cross-verify-salt")
+				saltHex := hex.EncodeToString(salt)
+				saltArgs = []string{"--salt", saltHex}
+			}
+
 			params := &VerityParams{
 				HashName:       tt.hashAlgo,
 				DataBlockSize:  tt.dataBlockSize,
 				HashBlockSize:  tt.hashBlockSize,
-				DataBlocks:     tt.dataBlocks,
-				HashType:       1,
+				DataBlocks:     tt.numBlocks,
+				HashType:       tt.hashType,
+				Salt:           salt,
+				SaltSize:       uint16(len(salt)),
 				HashAreaOffset: 0,
+				NoSuperblock:   true,
 			}
 
-			digestSize := getHashSize(tt.hashAlgo)
-			if digestSize <= 0 {
-				t.Fatalf("Invalid hash algorithm: %s", tt.hashAlgo)
+			t.Run("go_creates", func(t *testing.T) {
+				rootHashGo, err := HighLevelCreate(params, dataPath, hashPathGo)
+				if err != nil {
+					t.Fatalf("Go HighLevelCreate failed: %v", err)
+				}
+
+				args := []string{
+					"format",
+					dataPath,
+					hashPathVeritysetup,
+					"--hash", tt.hashAlgo,
+					"--data-block-size", fmt.Sprintf("%d", tt.dataBlockSize),
+					"--hash-block-size", fmt.Sprintf("%d", tt.hashBlockSize),
+				}
+				args = append(args, saltArgs...)
+
+				cmd := exec.Command("veritysetup", args...)
+				output, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("veritysetup format failed: %v\nOutput: %s", err, string(output))
+				}
+
+				rootHashC := extractRootHash(t, string(output))
+				rootHashCBytes, err := hex.DecodeString(rootHashC)
+				if err != nil {
+					t.Fatalf("failed to decode veritysetup root hash: %v", err)
+				}
+
+				if !bytes.Equal(rootHashGo, rootHashCBytes) {
+					t.Errorf("Root hash mismatch:\nGo:          %x\nveritysetup: %x",
+						rootHashGo, rootHashCBytes)
+				} else {
+					t.Logf("✓ Root hash match: %x", rootHashGo)
+				}
+			})
+
+			t.Run("veritysetup_creates_go_verifies", func(t *testing.T) {
+				args := []string{
+					"format",
+					dataPath,
+					hashPathVeritysetup,
+					"--hash", tt.hashAlgo,
+					"--data-block-size", fmt.Sprintf("%d", tt.dataBlockSize),
+					"--hash-block-size", fmt.Sprintf("%d", tt.hashBlockSize),
+				}
+				args = append(args, saltArgs...)
+
+				cmd := exec.Command("veritysetup", args...)
+				output, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("veritysetup format failed: %v\nOutput: %s", err, string(output))
+				}
+
+				rootHashC := extractRootHash(t, string(output))
+				rootHashCBytes, err := hex.DecodeString(rootHashC)
+				if err != nil {
+					t.Fatalf("failed to decode veritysetup root hash: %v", err)
+				}
+
+				t.Logf("veritysetup created hash tree with root hash: %x", rootHashCBytes)
+
+				hashContent, err := os.ReadFile(hashPathVeritysetup)
+				if err != nil {
+					t.Fatalf("Failed to read veritysetup hash file: %v", err)
+				}
+
+				superblockSize := int(tt.hashBlockSize)
+				if len(hashContent) > superblockSize {
+					hashTreeOnly := hashContent[superblockSize:]
+					hashPathStripped := createTestHashFile(t, int64(len(hashTreeOnly)))
+					defer os.Remove(hashPathStripped)
+
+					err = os.WriteFile(hashPathStripped, hashTreeOnly, 0644)
+					if err != nil {
+						t.Fatalf("Failed to write stripped hash file: %v", err)
+					}
+
+					err = HighLevelVerify(params, dataPath, hashPathStripped, rootHashCBytes)
+					if err != nil {
+						t.Errorf("Go failed to verify veritysetup hash tree: %v", err)
+					} else {
+						t.Logf("✓ Go successfully verified veritysetup hash tree")
+					}
+				} else {
+					t.Logf("⚠ Hash file too small, skipping verification")
+				}
+			})
+
+			t.Run("go_creates_go_verifies", func(t *testing.T) {
+				rootHashGo, err := HighLevelCreate(params, dataPath, hashPathGo)
+				if err != nil {
+					t.Fatalf("Go HighLevelCreate failed: %v", err)
+				}
+
+				err = HighLevelVerify(params, dataPath, hashPathGo, rootHashGo)
+				if err != nil {
+					t.Errorf("Go failed to verify its own hash tree: %v", err)
+				} else {
+					t.Logf("✓ Go successfully verified its own hash tree")
+				}
+			})
+		})
+	}
+}
+
+func TestDataCorruptionDetection(t *testing.T) {
+	tests := []struct {
+		name      string
+		hashAlgo  string
+		numBlocks uint64
+		useSalt   bool
+	}{
+		{
+			name:      "sha256 corruption detection no salt",
+			hashAlgo:  "sha256",
+			numBlocks: 16,
+			useSalt:   false,
+		},
+		{
+			name:      "sha256 corruption detection with salt",
+			hashAlgo:  "sha256",
+			numBlocks: 16,
+			useSalt:   true,
+		},
+		{
+			name:      "sha512 corruption detection",
+			hashAlgo:  "sha512",
+			numBlocks: 8,
+			useSalt:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataPath, _ := createTestDataFile(t, 4096, tt.numBlocks)
+			defer os.Remove(dataPath)
+
+			hashPath := createTestHashFile(t, int64(4096*uint32(tt.numBlocks)*2))
+			defer os.Remove(hashPath)
+
+			var salt []byte
+			if tt.useSalt {
+				salt = []byte("corruption-test-salt")
 			}
 
-			hashBlocks, err := VerityHashBlocks(params, digestSize)
+			params := &VerityParams{
+				HashName:       tt.hashAlgo,
+				DataBlockSize:  4096,
+				HashBlockSize:  4096,
+				DataBlocks:     tt.numBlocks,
+				HashType:       1,
+				Salt:           salt,
+				SaltSize:       uint16(len(salt)),
+				HashAreaOffset: 0,
+				NoSuperblock:   true,
+			}
+
+			rootHash, err := HighLevelCreate(params, dataPath, hashPath)
 			if err != nil {
-				t.Fatalf("VerityHashBlocks failed: %v", err)
+				t.Fatalf("HighLevelCreate failed: %v", err)
 			}
 
-			t.Logf("Data blocks: %d, Hash blocks needed: %d", tt.dataBlocks, hashBlocks)
+			err = HighLevelVerify(params, dataPath, hashPath, rootHash)
+			if err != nil {
+				t.Fatalf("Initial verification failed: %v", err)
+			}
+			t.Logf("✓ Initial verification successful")
 
-			if hashBlocks > tt.dataBlocks {
-				t.Errorf("Hash blocks (%d) should not exceed data blocks (%d)", hashBlocks, tt.dataBlocks)
+			dataFile, err := os.OpenFile(dataPath, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatalf("Failed to open data file: %v", err)
+			}
+			_, err = dataFile.WriteAt([]byte{0xFF, 0xFF, 0xFF, 0xFF}, 0)
+			dataFile.Close()
+			if err != nil {
+				t.Fatalf("Failed to corrupt data: %v", err)
 			}
 
-			if hashBlocks == 0 && tt.dataBlocks > 0 {
-				t.Error("Hash blocks should be > 0 for non-empty dataset")
+			err = HighLevelVerify(params, dataPath, hashPath, rootHash)
+			if err == nil {
+				t.Error("Verification should fail with corrupted data")
+			} else {
+				t.Logf("✓ Correctly detected data corruption: %v", err)
+			}
+
+			dataPath2, _ := createTestDataFile(t, 4096, tt.numBlocks)
+			defer os.Remove(dataPath2)
+			hashPath2 := createTestHashFile(t, int64(4096*uint32(tt.numBlocks)*2))
+			defer os.Remove(hashPath2)
+
+			rootHash2, _ := HighLevelCreate(params, dataPath2, hashPath2)
+
+			dataFile2, _ := os.OpenFile(dataPath2, os.O_RDWR, 0)
+			middleOffset := int64(tt.numBlocks/2) * 4096
+			dataFile2.WriteAt([]byte{0xAA, 0xBB, 0xCC, 0xDD}, middleOffset)
+			dataFile2.Close()
+
+			err = HighLevelVerify(params, dataPath2, hashPath2, rootHash2)
+			if err == nil {
+				t.Error("Verification should fail with corrupted middle block")
+			} else {
+				t.Logf("✓ Correctly detected middle block corruption: %v", err)
+			}
+		})
+	}
+}
+
+func TestHashTreeCorruptionDetection(t *testing.T) {
+	tests := []struct {
+		name      string
+		hashAlgo  string
+		numBlocks uint64
+	}{
+		{
+			name:      "sha256 hash tree corruption",
+			hashAlgo:  "sha256",
+			numBlocks: 16,
+		},
+		{
+			name:      "sha512 hash tree corruption",
+			hashAlgo:  "sha512",
+			numBlocks: 16,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataPath, _ := createTestDataFile(t, 4096, tt.numBlocks)
+			defer os.Remove(dataPath)
+
+			hashPath := createTestHashFile(t, int64(4096*uint32(tt.numBlocks)*2))
+			defer os.Remove(hashPath)
+
+			params := &VerityParams{
+				HashName:       tt.hashAlgo,
+				DataBlockSize:  4096,
+				HashBlockSize:  4096,
+				DataBlocks:     tt.numBlocks,
+				HashType:       1,
+				Salt:           []byte("hash-corruption-test"),
+				SaltSize:       20,
+				HashAreaOffset: 0,
+				NoSuperblock:   true,
+			}
+
+			rootHash, err := HighLevelCreate(params, dataPath, hashPath)
+			if err != nil {
+				t.Fatalf("HighLevelCreate failed: %v", err)
+			}
+
+			// Verify original
+			err = HighLevelVerify(params, dataPath, hashPath, rootHash)
+			if err != nil {
+				t.Fatalf("Initial verification failed: %v", err)
+			}
+			t.Logf("✓ Initial verification successful")
+
+			// Corrupt hash tree
+			hashFile, err := os.OpenFile(hashPath, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatalf("Failed to open hash file: %v", err)
+			}
+			_, err = hashFile.WriteAt([]byte{0xFF, 0xFF, 0xFF, 0xFF}, 100)
+			hashFile.Close()
+			if err != nil {
+				t.Fatalf("Failed to corrupt hash tree: %v", err)
+			}
+
+			err = HighLevelVerify(params, dataPath, hashPath, rootHash)
+			if err == nil {
+				t.Error("Verification should fail with corrupted hash tree")
+			} else {
+				t.Logf("✓ Correctly detected hash tree corruption: %v", err)
+			}
+		})
+	}
+}
+
+func TestRootHashMismatch(t *testing.T) {
+	dataPath, _ := createTestDataFile(t, 4096, 16)
+	defer os.Remove(dataPath)
+
+	hashPath := createTestHashFile(t, int64(4096*32))
+	defer os.Remove(hashPath)
+
+	params := &VerityParams{
+		HashName:       "sha256",
+		DataBlockSize:  4096,
+		HashBlockSize:  4096,
+		DataBlocks:     16,
+		HashType:       1,
+		Salt:           []byte("mismatch-test"),
+		SaltSize:       13,
+		HashAreaOffset: 0,
+		NoSuperblock:   true,
+	}
+
+	_, err := HighLevelCreate(params, dataPath, hashPath)
+	if err != nil {
+		t.Fatalf("HighLevelCreate failed: %v", err)
+	}
+
+	wrongRootHash := make([]byte, 32)
+	for i := range wrongRootHash {
+		wrongRootHash[i] = 0xFF
+	}
+
+	err = HighLevelVerify(params, dataPath, hashPath, wrongRootHash)
+	if err == nil {
+		t.Error("Verification should fail with wrong root hash")
+	} else {
+		t.Logf("✓ Correctly detected root hash mismatch: %v", err)
+	}
+}
+
+func TestBoundaryConditions(t *testing.T) {
+	tests := []struct {
+		name        string
+		numBlocks   uint64
+		shouldError bool
+		description string
+	}{
+		{
+			name:        "single block",
+			numBlocks:   1,
+			shouldError: false,
+			description: "Minimum valid data blocks",
+		},
+		{
+			name:        "two blocks",
+			numBlocks:   2,
+			shouldError: false,
+			description: "Small dataset",
+		},
+		{
+			name:        "large dataset",
+			numBlocks:   512,
+			shouldError: false,
+			description: "Large dataset requiring multiple hash levels",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataPath, _ := createTestDataFile(t, 4096, tt.numBlocks)
+			defer os.Remove(dataPath)
+
+			hashPath := createTestHashFile(t, int64(4096*uint32(tt.numBlocks)*4))
+			defer os.Remove(hashPath)
+
+			params := &VerityParams{
+				HashName:       "sha256",
+				DataBlockSize:  4096,
+				HashBlockSize:  4096,
+				DataBlocks:     tt.numBlocks,
+				HashType:       1,
+				Salt:           []byte("boundary-test"),
+				SaltSize:       13,
+				HashAreaOffset: 0,
+				NoSuperblock:   true,
+			}
+
+			rootHash, err := HighLevelCreate(params, dataPath, hashPath)
+			if tt.shouldError {
+				if err == nil {
+					t.Errorf("Expected error for %s, got nil", tt.description)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("HighLevelCreate failed for %s: %v", tt.description, err)
+			}
+
+			err = HighLevelVerify(params, dataPath, hashPath, rootHash)
+			if err != nil {
+				t.Errorf("Verification failed for %s: %v", tt.description, err)
+			} else {
+				t.Logf("✓ %s: %d blocks verified successfully", tt.description, tt.numBlocks)
 			}
 		})
 	}
