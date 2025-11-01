@@ -18,7 +18,16 @@ type Verifier struct {
 }
 
 func NewVerifier(params *VerityParams, dataPath, hashPath string, rootDigest []byte) (*Verifier, error) {
-	vh := NewVerityHash(params, dataPath, hashPath, rootDigest)
+	vh := NewVerityHash(
+		params.HashName,
+		params.DataBlockSize, params.HashBlockSize,
+		params.DataBlocks,
+		params.HashType,
+		params.Salt,
+		params.HashAreaOffset,
+		dataPath, hashPath,
+		rootDigest,
+	)
 
 	if err := validateParams(params, vh.hashFunc.Size()); err != nil {
 		return nil, err
@@ -68,7 +77,16 @@ type Creator struct {
 }
 
 func NewCreator(params *VerityParams, dataPath, hashPath string) (*Creator, error) {
-	vh := NewVerityHash(params, dataPath, hashPath, nil)
+	vh := NewVerityHash(
+		params.HashName,
+		params.DataBlockSize, params.HashBlockSize,
+		params.DataBlocks,
+		params.HashType,
+		params.Salt,
+		params.HashAreaOffset,
+		dataPath, hashPath,
+		nil,
+	)
 
 	if err := validateParams(params, vh.hashFunc.Size()); err != nil {
 		return nil, err
@@ -145,7 +163,9 @@ func uint64MultOverflow(a, b uint64) bool {
 
 func VerityHashBlocks(params *VerityParams, digestSize int) (uint64, error) {
 	vh := &VerityHash{
-		params: params,
+		hashBlockSize:  params.HashBlockSize,
+		hashAreaOffset: params.HashAreaOffset,
+		dataBlocks:     params.DataBlocks,
 		hashFunc: func() crypto.Hash {
 			switch digestSize {
 			case 20:
@@ -160,7 +180,7 @@ func VerityHashBlocks(params *VerityParams, digestSize int) (uint64, error) {
 		}(),
 	}
 
-	levels, err := vh.hashLevels(params.DataBlocks)
+	levels, err := vh.hashLevels(vh.dataBlocks)
 	if err != nil {
 		return 0, err
 	}
@@ -169,7 +189,7 @@ func VerityHashBlocks(params *VerityParams, digestSize int) (uint64, error) {
 		return 0, nil
 	}
 
-	hashPosition := (levels[len(levels)-1].offset + levels[len(levels)-1].numBlocks*uint64(params.HashBlockSize)) / uint64(params.HashBlockSize)
+	hashPosition := (levels[len(levels)-1].offset + levels[len(levels)-1].numBlocks*uint64(vh.hashBlockSize)) / uint64(vh.hashBlockSize)
 
 	return hashPosition, nil
 }
@@ -196,7 +216,16 @@ func HighLevelVerify(params *VerityParams, dataDevice, hashDevice string, rootHa
 		}
 	}
 
-	vh := NewVerityHash(params, dataDevice, hashDevice, rootHash)
+	vh := NewVerityHash(
+		params.HashName,
+		params.DataBlockSize, params.HashBlockSize,
+		params.DataBlocks,
+		params.HashType,
+		params.Salt,
+		params.HashAreaOffset,
+		dataDevice, hashDevice,
+		rootHash,
+	)
 
 	if err := validateParams(params, vh.hashFunc.Size()); err != nil {
 		return err
@@ -231,7 +260,16 @@ func HighLevelCreate(params *VerityParams, dataDevice, hashDevice string) ([]byt
 		}
 	}
 
-	vh := NewVerityHash(params, dataDevice, hashDevice, nil)
+	vh := NewVerityHash(
+		params.HashName,
+		params.DataBlockSize, params.HashBlockSize,
+		params.DataBlocks,
+		params.HashType,
+		params.Salt,
+		params.HashAreaOffset,
+		dataDevice, hashDevice,
+		nil,
+	)
 
 	if err := validateParams(params, vh.hashFunc.Size()); err != nil {
 		return nil, err
@@ -246,7 +284,7 @@ func HighLevelCreate(params *VerityParams, dataDevice, hashDevice string) ([]byt
 
 func VerifyBlock(params *VerityParams, hashName string, data, salt, expectedHash []byte) error {
 	vh := &VerityHash{
-		params: params,
+		hashType: params.HashType,
 		hashFunc: func() crypto.Hash {
 			hashMap := map[string]crypto.Hash{
 				"sha256": crypto.SHA256,

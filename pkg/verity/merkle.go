@@ -11,11 +11,17 @@ import (
 )
 
 type VerityHash struct {
-	params     *VerityParams
-	dataDevice string
-	hashDevice string
-	rootHash   []byte
-	hashFunc   crypto.Hash
+	hashName       string
+	dataBlockSize  uint32
+	hashBlockSize  uint32
+	dataBlocks     uint64
+	hashType       uint32
+	salt           []byte
+	hashAreaOffset uint64
+	dataDevice     string
+	hashDevice     string
+	rootHash       []byte
+	hashFunc       crypto.Hash
 }
 
 type hashTreeLevel struct {
@@ -24,7 +30,16 @@ type hashTreeLevel struct {
 	numBlocks uint64
 }
 
-func NewVerityHash(p *VerityParams, dataDevice, hashDevice string, rootHash []byte) *VerityHash {
+func NewVerityHash(
+	hashName string,
+	dataBlockSize, hashBlockSize uint32,
+	dataBlocks uint64,
+	hashType uint32,
+	salt []byte,
+	hashAreaOffset uint64,
+	dataDevice, hashDevice string,
+	rootHash []byte,
+) *VerityHash {
 	hashMap := map[string]crypto.Hash{
 		"sha256": crypto.SHA256,
 		"sha512": crypto.SHA512,
@@ -32,16 +47,22 @@ func NewVerityHash(p *VerityParams, dataDevice, hashDevice string, rootHash []by
 	}
 
 	hashFunc := crypto.SHA256
-	if h, ok := hashMap[p.HashName]; ok && h.Available() {
+	if h, ok := hashMap[hashName]; ok && h.Available() {
 		hashFunc = h
 	}
 
 	vh := &VerityHash{
-		params:     p,
-		dataDevice: dataDevice,
-		hashDevice: hashDevice,
-		rootHash:   make([]byte, hashFunc.Size()),
-		hashFunc:   hashFunc,
+		hashName:       hashName,
+		dataBlockSize:  dataBlockSize,
+		hashBlockSize:  hashBlockSize,
+		dataBlocks:     dataBlocks,
+		hashType:       hashType,
+		salt:           salt,
+		hashAreaOffset: hashAreaOffset,
+		dataDevice:     dataDevice,
+		hashDevice:     hashDevice,
+		rootHash:       make([]byte, hashFunc.Size()),
+		hashFunc:       hashFunc,
 	}
 	if rootHash != nil {
 		copy(vh.rootHash, rootHash)
@@ -77,7 +98,7 @@ func (vh *VerityHash) hashLevels(dataFileBlocks uint64) ([]hashTreeLevel, error)
 		return nil, fmt.Errorf("invalid digest size")
 	}
 
-	hashPerBlockBits := getBitsDown(vh.params.HashBlockSize / digestSize)
+	hashPerBlockBits := getBitsDown(vh.hashBlockSize / digestSize)
 	if hashPerBlockBits == 0 {
 		return nil, fmt.Errorf("hash block size too small for digest")
 	}
@@ -93,10 +114,10 @@ func (vh *VerityHash) hashLevels(dataFileBlocks uint64) ([]hashTreeLevel, error)
 	}
 
 	levels := make([]hashTreeLevel, numLevels)
-	hashPosition := vh.params.HashAreaOffset / uint64(vh.params.HashBlockSize)
+	hashPosition := vh.hashAreaOffset / uint64(vh.hashBlockSize)
 
 	for i := numLevels - 1; i >= 0; i-- {
-		levels[i].offset = hashPosition * uint64(vh.params.HashBlockSize)
+		levels[i].offset = hashPosition * uint64(vh.hashBlockSize)
 
 		sShift := uint((i + 1) * int(hashPerBlockBits))
 		if sShift > 63 {
@@ -118,7 +139,7 @@ func (vh *VerityHash) hashLevels(dataFileBlocks uint64) ([]hashTreeLevel, error)
 func (vh *VerityHash) verifyHashBlock(data, salt []byte) ([]byte, error) {
 	h := vh.hashFunc.New()
 
-	if vh.params.HashType == 1 {
+	if vh.hashType == 1 {
 		if len(salt) > 0 {
 			h.Write(salt)
 		}
@@ -143,7 +164,7 @@ func verifyZero(block []byte, offset uint64) error {
 }
 
 func (vh *VerityHash) getDigestSizeFull(hashSize uint32) uint32 {
-	if vh.params.HashType == 0 {
+	if vh.hashType == 0 {
 		return hashSize
 	}
 	if hashSize == 0 {
@@ -204,7 +225,7 @@ func (vh *VerityHash) createOrVerify(
 				return fmt.Errorf("cannot read data block: %w", err)
 			}
 
-			hash, err := vh.verifyHashBlock(dataBuffer, vh.params.Salt)
+			hash, err := vh.verifyHashBlock(dataBuffer, vh.salt)
 			if err != nil {
 				return fmt.Errorf("hash calculation failed: %w", err)
 			}
@@ -228,7 +249,7 @@ func (vh *VerityHash) createOrVerify(
 				}
 			}
 
-			if vh.params.HashType == 0 {
+			if vh.hashType == 0 {
 				leftBytes -= digestSize
 			} else {
 				padding := digestSizeFull - digestSize
@@ -277,7 +298,7 @@ func (vh *VerityHash) createOrVerifyHashTree(verify bool) error {
 		return fmt.Errorf("digest size exceeds maximum")
 	}
 
-	dataFileBlocks := vh.params.DataBlocks
+	dataFileBlocks := vh.dataBlocks
 
 	levels, err := vh.hashLevels(dataFileBlocks)
 	if err != nil {
@@ -311,9 +332,9 @@ func (vh *VerityHash) createOrVerifyHashTree(verify bool) error {
 			rd = dataFile
 			wr = hashFile
 			dataBlock = 0
-			dataBlockSize = vh.params.DataBlockSize
-			hashBlock = levels[i].offset / uint64(vh.params.HashBlockSize)
-			hashBlockSize = vh.params.HashBlockSize
+			dataBlockSize = vh.dataBlockSize
+			hashBlock = levels[i].offset / uint64(vh.hashBlockSize)
+			hashBlockSize = vh.hashBlockSize
 			blocks = dataFileBlocks
 		} else {
 			hashFile2, err := os.Open(vh.hashDevice)
@@ -322,10 +343,10 @@ func (vh *VerityHash) createOrVerifyHashTree(verify bool) error {
 			}
 			rd = hashFile2
 			wr = hashFile
-			dataBlock = levels[i-1].offset / uint64(vh.params.HashBlockSize)
-			dataBlockSize = vh.params.HashBlockSize
-			hashBlock = levels[i].offset / uint64(vh.params.HashBlockSize)
-			hashBlockSize = vh.params.HashBlockSize
+			dataBlock = levels[i-1].offset / uint64(vh.hashBlockSize)
+			dataBlockSize = vh.hashBlockSize
+			hashBlock = levels[i].offset / uint64(vh.hashBlockSize)
+			hashBlockSize = vh.hashBlockSize
 			blocks = levels[i-1].numBlocks
 
 			err = vh.createOrVerify(rd, wr, dataBlock, dataBlockSize, hashBlock, hashBlockSize, blocks, verify, calculatedDigest)
@@ -351,8 +372,8 @@ func (vh *VerityHash) createOrVerifyHashTree(verify bool) error {
 
 		err = vh.createOrVerify(
 			hashFile2, nil,
-			lastLevel.offset/uint64(vh.params.HashBlockSize), vh.params.HashBlockSize,
-			0, vh.params.HashBlockSize,
+			lastLevel.offset/uint64(vh.hashBlockSize), vh.hashBlockSize,
+			0, vh.hashBlockSize,
 			1, verify, calculatedDigest,
 		)
 		if err != nil {
@@ -361,8 +382,8 @@ func (vh *VerityHash) createOrVerifyHashTree(verify bool) error {
 	} else {
 		err = vh.createOrVerify(
 			dataFile, nil,
-			0, vh.params.DataBlockSize,
-			0, vh.params.HashBlockSize,
+			0, vh.dataBlockSize,
+			0, vh.hashBlockSize,
 			dataFileBlocks, verify, calculatedDigest,
 		)
 		if err != nil {

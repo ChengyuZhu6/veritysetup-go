@@ -145,7 +145,16 @@ func TestHashFileContentComparison(t *testing.T) {
 				HashAreaOffset: 0,
 			}
 
-			vhGo := NewVerityHash(params, dataPath, hashPathGo, nil)
+			vhGo := NewVerityHash(
+				params.HashName,
+				params.DataBlockSize, params.HashBlockSize,
+				params.DataBlocks,
+				params.HashType,
+				params.Salt,
+				params.HashAreaOffset,
+				dataPath, hashPathGo,
+				nil,
+			)
 			err := vhGo.createOrVerifyHashTree(false)
 			if err != nil {
 				t.Fatalf("Go createOrVerifyHashTree failed: %v", err)
@@ -196,14 +205,32 @@ func TestHashFileContentComparison(t *testing.T) {
 					t.Fatalf("failed to write stripped hash file: %v", err3)
 				}
 
-				vhVerifyStripped := NewVerityHash(params, dataPath, hashPathCStripped, rootHashCBytes)
+				vhVerifyStripped := NewVerityHash(
+					params.HashName,
+					params.DataBlockSize, params.HashBlockSize,
+					params.DataBlocks,
+					params.HashType,
+					params.Salt,
+					params.HashAreaOffset,
+					dataPath, hashPathCStripped,
+					rootHashCBytes,
+				)
 				err = vhVerifyStripped.createOrVerifyHashTree(true)
 				if err != nil {
 					t.Errorf("Go verifying stripped cryptsetup hash: ❌ FAILED (%v)", err)
 				}
 			}
 
-			vhVerifyGo := NewVerityHash(params, dataPath, hashPathGo, rootHashGo)
+			vhVerifyGo := NewVerityHash(
+				params.HashName,
+				params.DataBlockSize, params.HashBlockSize,
+				params.DataBlocks,
+				params.HashType,
+				params.Salt,
+				params.HashAreaOffset,
+				dataPath, hashPathGo,
+				rootHashGo,
+			)
 			err = vhVerifyGo.createOrVerifyHashTree(true)
 			if err != nil {
 				t.Errorf("Go verifying own hash: ❌ FAILED (%v)", err)
@@ -285,7 +312,16 @@ func TestCrossCheckWithCryptsetup(t *testing.T) {
 				HashAreaOffset: 0,
 			}
 
-			vhGo := NewVerityHash(params, dataPath, hashPathGo, nil)
+			vhGo := NewVerityHash(
+				params.HashName,
+				params.DataBlockSize, params.HashBlockSize,
+				params.DataBlocks,
+				params.HashType,
+				params.Salt,
+				params.HashAreaOffset,
+				dataPath, hashPathGo,
+				nil,
+			)
 			err := vhGo.createOrVerifyHashTree(false)
 			if err != nil {
 				t.Fatalf("Go createOrVerifyHashTree failed: %v", err)
@@ -319,7 +355,16 @@ func TestCrossCheckWithCryptsetup(t *testing.T) {
 					rootHashGo, rootHashCBytes)
 			}
 
-			vhSelfVerify := NewVerityHash(params, dataPath, hashPathGo, rootHashGo)
+			vhSelfVerify := NewVerityHash(
+				params.HashName,
+				params.DataBlockSize, params.HashBlockSize,
+				params.DataBlocks,
+				params.HashType,
+				params.Salt,
+				params.HashAreaOffset,
+				dataPath, hashPathGo,
+				rootHashGo,
+			)
 			err = vhSelfVerify.createOrVerifyHashTree(true)
 			if err != nil {
 				t.Errorf("Go failed to verify its own hash tree: %v", err)
@@ -366,7 +411,16 @@ func TestManualHashTreeVerification(t *testing.T) {
 		HashAreaOffset: 0,
 	}
 
-	vh := NewVerityHash(params, dataPath.Name(), hashPath, nil)
+	vh := NewVerityHash(
+		params.HashName,
+		params.DataBlockSize, params.HashBlockSize,
+		params.DataBlocks,
+		params.HashType,
+		params.Salt,
+		params.HashAreaOffset,
+		dataPath.Name(), hashPath,
+		nil,
+	)
 	err = vh.createOrVerifyHashTree(false)
 	if err != nil {
 		t.Fatalf("createOrVerifyHashTree failed: %v", err)
@@ -392,7 +446,16 @@ func TestManualHashTreeVerification(t *testing.T) {
 		}
 	}
 
-	vhVerify := NewVerityHash(params, dataPath.Name(), hashPath, rootHash)
+	vhVerify := NewVerityHash(
+		params.HashName,
+		params.DataBlockSize, params.HashBlockSize,
+		params.DataBlocks,
+		params.HashType,
+		params.Salt,
+		params.HashAreaOffset,
+		dataPath.Name(), hashPath,
+		rootHash,
+	)
 	err = vhVerify.createOrVerifyHashTree(true)
 	if err != nil {
 		t.Errorf("verification failed: %v", err)
@@ -421,7 +484,16 @@ func TestHashTreeStructure(t *testing.T) {
 		HashAreaOffset: 0,
 	}
 
-	vh := NewVerityHash(params, dataPath, hashPath, nil)
+	vh := NewVerityHash(
+		params.HashName,
+		params.DataBlockSize, params.HashBlockSize,
+		params.DataBlocks,
+		params.HashType,
+		params.Salt,
+		params.HashAreaOffset,
+		dataPath, hashPath,
+		nil,
+	)
 
 	_, err := vh.hashLevels(numBlocks)
 	if err != nil {
@@ -435,7 +507,16 @@ func TestHashTreeStructure(t *testing.T) {
 
 	rootHash := vh.RootHash()
 
-	vhVerify := NewVerityHash(params, dataPath, hashPath, rootHash)
+	vhVerify := NewVerityHash(
+		params.HashName,
+		params.DataBlockSize, params.HashBlockSize,
+		params.DataBlocks,
+		params.HashType,
+		params.Salt,
+		params.HashAreaOffset,
+		dataPath, hashPath,
+		rootHash,
+	)
 	err = vhVerify.createOrVerifyHashTree(true)
 	if err != nil {
 		t.Errorf("verification failed: %v", err)
