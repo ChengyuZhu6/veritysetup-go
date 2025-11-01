@@ -3,6 +3,7 @@ package verity
 import (
 	"bytes"
 	"crypto"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -84,17 +85,45 @@ func (c *Creator) Create() ([]byte, error) {
 }
 
 func validateParams(params *VerityParams, digestSize int) error {
-	if params.SaltSize > 256 {
-		return fmt.Errorf("salt size %d exceeds maximum of 256 bytes", params.SaltSize)
+	if params == nil {
+		return errors.New("verity: nil params")
+	}
+
+	if params.HashType > VerityMaxHashType {
+		return fmt.Errorf("verity: unsupported hash type %d", params.HashType)
+	}
+	if params.HashName == "" {
+		return errors.New("verity: hash algorithm required")
+	}
+
+	if params.SaltSize > MaxSaltSize {
+		return fmt.Errorf("salt size %d exceeds maximum of %d bytes", params.SaltSize, MaxSaltSize)
 	}
 
 	if digestSize > VerityMaxDigestSize {
 		return fmt.Errorf("digest size %d exceeds maximum of %d bytes", digestSize, VerityMaxDigestSize)
 	}
 
+	if !IsBlockSizeValid(params.DataBlockSize) {
+		return fmt.Errorf("invalid data block size: %d", params.DataBlockSize)
+	}
+	if !IsBlockSizeValid(params.HashBlockSize) {
+		return fmt.Errorf("invalid hash block size: %d", params.HashBlockSize)
+	}
+
 	if uint64MultOverflow(params.DataBlocks, uint64(params.DataBlockSize)) {
 		return fmt.Errorf("data device offset overflow: %d blocks * %d bytes",
 			params.DataBlocks, params.DataBlockSize)
+	}
+
+	if params.NoSuperblock {
+		if params.HashAreaOffset%uint64(params.HashBlockSize) != 0 {
+			return fmt.Errorf("hash offset %d must be aligned to hash block size %d", params.HashAreaOffset, params.HashBlockSize)
+		}
+	} else {
+		if params.HashAreaOffset == 0 {
+			return errors.New("verity: hash area offset not initialised for superblock mode")
+		}
 	}
 
 	pageSize := uint32(unix.Getpagesize())
@@ -140,17 +169,14 @@ func VerityHashBlocks(params *VerityParams, digestSize int) (uint64, error) {
 		return 0, nil
 	}
 
-	lastLevel := levels[len(levels)-1]
-	hashPosition := (lastLevel.offset + lastLevel.numBlocks*uint64(params.HashBlockSize)) / uint64(params.HashBlockSize)
+	hashPosition := (levels[len(levels)-1].offset + levels[len(levels)-1].numBlocks*uint64(params.HashBlockSize)) / uint64(params.HashBlockSize)
 
 	return hashPosition, nil
 }
 
 func HighLevelVerify(params *VerityParams, dataDevice, hashDevice string, rootHash []byte) error {
-	vh := NewVerityHash(params, dataDevice, hashDevice, rootHash)
-
-	if err := validateParams(params, vh.hashFunc.Size()); err != nil {
-		return err
+	if params == nil {
+		return errors.New("verity: nil params")
 	}
 
 	if !params.NoSuperblock {
@@ -160,38 +186,32 @@ func HighLevelVerify(params *VerityParams, dataDevice, hashDevice string, rootHa
 		}
 		defer hashFile.Close()
 
-		sbData := make([]byte, VeritySuperblockSize)
-		if _, err := hashFile.Read(sbData); err != nil {
-			return fmt.Errorf("read superblock: %w", err)
-		}
-
-		sb, err := DeserializeSuperblock(sbData)
+		sb, err := ReadSuperblock(hashFile, params.HashAreaOffset)
 		if err != nil {
 			return err
 		}
 
-		if err := validateAndAdoptSuperblock(params, sb); err != nil {
+		if err := AdoptParamsFromSuperblock(params, sb, params.HashAreaOffset); err != nil {
 			return err
 		}
+	}
+
+	vh := NewVerityHash(params, dataDevice, hashDevice, rootHash)
+
+	if err := validateParams(params, vh.hashFunc.Size()); err != nil {
+		return err
 	}
 
 	return vh.createOrVerifyHashTree(true)
 }
 
 func HighLevelCreate(params *VerityParams, dataDevice, hashDevice string) ([]byte, error) {
-	vh := NewVerityHash(params, dataDevice, hashDevice, nil)
-
-	if err := validateParams(params, vh.hashFunc.Size()); err != nil {
-		return nil, err
+	if params == nil {
+		return nil, errors.New("verity: nil params")
 	}
 
 	if !params.NoSuperblock {
-		sb, err := buildSuperblockFromParams(params)
-		if err != nil {
-			return nil, err
-		}
-
-		data, err := sb.Serialize()
+		sb, err := BuildSuperblockFromParams(params)
 		if err != nil {
 			return nil, err
 		}
@@ -202,11 +222,19 @@ func HighLevelCreate(params *VerityParams, dataDevice, hashDevice string) ([]byt
 		}
 		defer hashFile.Close()
 
-		if _, err := hashFile.Write(data); err != nil {
-			return nil, fmt.Errorf("write superblock: %w", err)
+		if err := sb.WriteSuperblock(hashFile, params.HashAreaOffset); err != nil {
+			return nil, err
 		}
 
-		params.HashAreaOffset = alignUp(VeritySuperblockSize, uint64(params.HashBlockSize))
+		if err := AdoptParamsFromSuperblock(params, sb, params.HashAreaOffset); err != nil {
+			return nil, err
+		}
+	}
+
+	vh := NewVerityHash(params, dataDevice, hashDevice, nil)
+
+	if err := validateParams(params, vh.hashFunc.Size()); err != nil {
+		return nil, err
 	}
 
 	if err := vh.createOrVerifyHashTree(false); err != nil {

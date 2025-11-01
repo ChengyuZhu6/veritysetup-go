@@ -2,9 +2,15 @@ package verity
 
 import (
 	"bytes"
+	"crypto"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
+	"math"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -14,9 +20,31 @@ const (
 	VerityMaxLevels      = 63
 	VerityMaxDigestSize  = 1024
 	MaxSaltSize          = 256
+	diskSectorSize       = 512
 )
 
-// VeritySuperblock represents the on-disk superblock format
+var (
+	errInvalidSignature = errors.New("verity: invalid superblock signature")
+	errInvalidVersion   = errors.New("verity: unsupported superblock version")
+)
+
+func init() {
+	if binary.Size(VeritySuperblock{}) != VeritySuperblockSize {
+		panic(fmt.Sprintf("verity: unexpected superblock size: %d", binary.Size(VeritySuperblock{})))
+	}
+}
+
+func alignUp(value, alignment uint64) uint64 {
+	if alignment == 0 {
+		return value
+	}
+	rem := value % alignment
+	if rem == 0 {
+		return value
+	}
+	return value + (alignment - rem)
+}
+
 type VeritySuperblock struct {
 	Signature     [8]byte
 	Version       uint32
@@ -32,7 +60,6 @@ type VeritySuperblock struct {
 	Pad2          [168]byte
 }
 
-// DefaultVeritySuperblock returns a VeritySuperblock with default values
 func DefaultVeritySuperblock() VeritySuperblock {
 	return VeritySuperblock{
 		Signature:     [8]byte{0x76, 0x65, 0x72, 0x69, 0x74, 0x79, 0x00, 0x00},
@@ -40,150 +67,270 @@ func DefaultVeritySuperblock() VeritySuperblock {
 		HashType:      1,
 		DataBlockSize: 4096,
 		HashBlockSize: 4096,
-		Algorithm:     [32]byte{0x73, 0x68, 0x61, 0x32, 0x35, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		Algorithm:     [32]byte{0x73, 0x68, 0x61, 0x32, 0x35, 0x36},
 	}
 }
 
-// NewSuperblock creates a new VeritySuperblock with signature and defaults.
 func NewSuperblock() *VeritySuperblock {
-	sb := &VeritySuperblock{}
-	copy(sb.Signature[:], VeritySignature)
-	sb.Version = 1
-	sb.HashType = 1 // normal
-	return sb
+	sb := DefaultVeritySuperblock()
+	return &sb
 }
 
-// Serialize serializes the superblock into a little-endian byte slice of size VeritySuperblockSize.
 func (sb *VeritySuperblock) Serialize() ([]byte, error) {
-	buf := new(bytes.Buffer)
+	buf := bytes.NewBuffer(make([]byte, 0, VeritySuperblockSize))
 	if err := binary.Write(buf, binary.LittleEndian, sb); err != nil {
-		return nil, fmt.Errorf("failed to serialize superblock: %w", err)
+		return nil, fmt.Errorf("verity: failed to serialize superblock: %w", err)
+	}
+	if buf.Len() != VeritySuperblockSize {
+		return nil, fmt.Errorf("verity: serialized superblock has unexpected length %d", buf.Len())
 	}
 	return buf.Bytes(), nil
 }
 
-// DeserializeSuperblock parses a VeritySuperblock from a little-endian byte slice.
 func DeserializeSuperblock(data []byte) (*VeritySuperblock, error) {
 	if len(data) < VeritySuperblockSize {
-		return nil, fmt.Errorf("data too short for superblock")
+		return nil, fmt.Errorf("verity: data too short for superblock (%d bytes)", len(data))
 	}
 
 	sb := &VeritySuperblock{}
-	buf := bytes.NewReader(data)
+	buf := bytes.NewReader(data[:VeritySuperblockSize])
 	if err := binary.Read(buf, binary.LittleEndian, sb); err != nil {
-		return nil, fmt.Errorf("failed to deserialize superblock: %w", err)
+		return nil, fmt.Errorf("verity: failed to deserialize superblock: %w", err)
 	}
 
-	if string(sb.Signature[:]) != VeritySignature {
-		return nil, fmt.Errorf("invalid verity signature")
+	if err := sb.validateBasic(); err != nil {
+		return nil, err
 	}
-	if sb.Version != 1 {
-		return nil, fmt.Errorf("unsupported verity version: %d", sb.Version)
+	return sb, nil
+}
+
+func ReadSuperblock(r io.ReaderAt, sbOffset uint64) (*VeritySuperblock, error) {
+	if sbOffset%diskSectorSize != 0 {
+		return nil, fmt.Errorf("verity: superblock offset %d is not %d-byte aligned", sbOffset, diskSectorSize)
+	}
+	if sbOffset > math.MaxInt64 {
+		return nil, fmt.Errorf("verity: superblock offset overflows int64: %d", sbOffset)
+	}
+
+	buf := make([]byte, VeritySuperblockSize)
+	n, err := r.ReadAt(buf, int64(sbOffset))
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("verity: read superblock failed: %w", err)
+	}
+	if n != VeritySuperblockSize {
+		return nil, fmt.Errorf("verity: short read for superblock: got %d bytes", n)
+	}
+
+	sb, err := DeserializeSuperblock(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	if uuidVal, uuidErr := uuid.FromBytes(sb.UUID[:]); uuidErr == nil {
+		if uuidVal == uuid.Nil {
+			return nil, errors.New("verity: superblock missing UUID")
+		}
 	}
 
 	return sb, nil
 }
 
-// alignUp returns x aligned up to the next multiple of align (align must be power of two or positive divisor).
-func alignUp(x, align uint64) uint64 {
-	if align == 0 {
-		return x
+func (sb *VeritySuperblock) WriteSuperblock(w io.WriterAt, sbOffset uint64) error {
+	if sbOffset%diskSectorSize != 0 {
+		return fmt.Errorf("verity: superblock offset %d is not %d-byte aligned", sbOffset, diskSectorSize)
 	}
-	rem := x % align
-	if rem == 0 {
-		return x
+	if sbOffset > math.MaxInt64 {
+		return fmt.Errorf("verity: superblock offset overflows int64: %d", sbOffset)
 	}
-	return x + (align - rem)
+
+	data, err := sb.Serialize()
+	if err != nil {
+		return err
+	}
+
+	n, writeErr := w.WriteAt(data, int64(sbOffset))
+	if writeErr != nil {
+		return fmt.Errorf("verity: write superblock failed: %w", writeErr)
+	}
+	if n != len(data) {
+		return fmt.Errorf("verity: short write for superblock: wrote %d bytes", n)
+	}
+	return nil
+}
+
+func (sb *VeritySuperblock) validateBasic() error {
+	if string(sb.Signature[:]) != VeritySignature {
+		return errInvalidSignature
+	}
+	if sb.Version != 1 {
+		return fmt.Errorf("%w: %d", errInvalidVersion, sb.Version)
+	}
+	return nil
+}
+
+func (sb *VeritySuperblock) algorithmString() string {
+	return strings.ToLower(strings.TrimRight(string(sb.Algorithm[:]), "\x00"))
+}
+
+func (sb *VeritySuperblock) UUIDString() (string, error) {
+	uuidVal, err := uuid.FromBytes(sb.UUID[:])
+	if err != nil {
+		return "", fmt.Errorf("verity: invalid superblock UUID: %w", err)
+	}
+	if uuidVal == uuid.Nil {
+		return "", errors.New("verity: superblock missing UUID")
+	}
+	return uuidVal.String(), nil
+}
+
+func (sb *VeritySuperblock) SetUUIDFromString(s string) error {
+	uuidVal, err := uuid.Parse(strings.TrimSpace(s))
+	if err != nil {
+		return fmt.Errorf("verity: invalid UUID %q: %w", s, err)
+	}
+	copy(sb.UUID[:], uuidVal[:])
+	return nil
+}
+
+func BuildSuperblockFromParams(p *VerityParams) (*VeritySuperblock, error) {
+	return buildSuperblockFromParams(p)
 }
 
 func buildSuperblockFromParams(p *VerityParams) (*VeritySuperblock, error) {
-	if !IsBlockSizeValid(p.DataBlockSize) || !IsBlockSizeValid(p.HashBlockSize) {
-		return nil, fmt.Errorf("invalid block sizes: data %d hash %d", p.DataBlockSize, p.HashBlockSize)
+	if p == nil {
+		return nil, errors.New("verity: nil params provided")
 	}
-	if p.SaltSize != uint16(len(p.Salt)) {
-		return nil, fmt.Errorf("salt size mismatch: declared %d actual %d", p.SaltSize, len(p.Salt))
+	if !IsBlockSizeValid(p.DataBlockSize) || !IsBlockSizeValid(p.HashBlockSize) {
+		return nil, fmt.Errorf("verity: invalid block sizes: data %d hash %d", p.DataBlockSize, p.HashBlockSize)
+	}
+	if p.HashType > VerityMaxHashType {
+		return nil, fmt.Errorf("verity: unsupported hash type %d", p.HashType)
+	}
+	if len(p.Salt) != int(p.SaltSize) {
+		return nil, fmt.Errorf("verity: salt size mismatch: declared %d actual %d", p.SaltSize, len(p.Salt))
 	}
 	if p.SaltSize > MaxSaltSize {
-		return nil, fmt.Errorf("salt too large: %d > %d", p.SaltSize, MaxSaltSize)
+		return nil, fmt.Errorf("verity: salt too large: %d > %d", p.SaltSize, MaxSaltSize)
 	}
-	algo := strings.ToLower(p.HashName)
+
+	algo := strings.ToLower(strings.TrimSpace(p.HashName))
+	if algo == "" {
+		return nil, errors.New("verity: hash algorithm required")
+	}
+	if !isHashAlgorithmSupported(algo) {
+		return nil, fmt.Errorf("verity: hash algorithm %s not supported", algo)
+	}
+
 	sb := DefaultVeritySuperblock()
+	copy(sb.Signature[:], VeritySignature)
+	sb.Version = 1
 	sb.HashType = p.HashType
 	sb.DataBlockSize = p.DataBlockSize
 	sb.HashBlockSize = p.HashBlockSize
 	sb.DataBlocks = p.DataBlocks
 	sb.SaltSize = p.SaltSize
-	copy(sb.Salt[:], p.Salt)
 	sb.UUID = p.UUID
-	// write algorithm name as lower-case, null-padded
+
 	for i := range sb.Algorithm {
 		sb.Algorithm[i] = 0
 	}
 	copy(sb.Algorithm[:], []byte(algo))
+
+	for i := range sb.Salt {
+		sb.Salt[i] = 0
+	}
+	copy(sb.Salt[:], p.Salt)
+
+	p.NoSuperblock = false
+
 	return &sb, nil
 }
 
-func validateAndAdoptSuperblock(p *VerityParams, sb *VeritySuperblock) error {
-	if string(sb.Signature[:]) != VeritySignature {
-		return fmt.Errorf("invalid verity signature")
+func adoptParamsFromSuperblock(p *VerityParams, sb *VeritySuperblock, sbOffset uint64) error {
+	if p == nil || sb == nil {
+		return errors.New("verity: nil params or superblock")
 	}
-	if sb.Version != 1 {
-		return fmt.Errorf("unsupported verity version: %d", sb.Version)
+	if err := sb.validateBasic(); err != nil {
+		return err
 	}
 	if sb.HashType > VerityMaxHashType {
-		return fmt.Errorf("unsupported hash type: %d", sb.HashType)
+		return fmt.Errorf("verity: unsupported hash type %d", sb.HashType)
 	}
 	if !IsBlockSizeValid(sb.DataBlockSize) || !IsBlockSizeValid(sb.HashBlockSize) {
-		return fmt.Errorf("invalid block size in superblock: data %d hash %d", sb.DataBlockSize, sb.HashBlockSize)
+		return fmt.Errorf("verity: invalid block size in superblock: data %d hash %d", sb.DataBlockSize, sb.HashBlockSize)
 	}
 	if sb.SaltSize > MaxSaltSize {
-		return fmt.Errorf("superblock salt too large: %d", sb.SaltSize)
+		return fmt.Errorf("verity: superblock salt too large: %d", sb.SaltSize)
 	}
-	// Algorithm must match params (lower-case). If params empty, adopt from superblock.
-	algo := strings.TrimRight(string(sb.Algorithm[:]), "\x00")
-	algo = strings.ToLower(algo)
+
+	algo := sb.algorithmString()
+	if algo == "" {
+		return fmt.Errorf("verity: missing hash algorithm in superblock")
+	}
+
 	if p.HashName == "" {
 		p.HashName = algo
+	} else if strings.ToLower(p.HashName) != algo {
+		return fmt.Errorf("verity: algorithm mismatch: param %s superblock %s", p.HashName, algo)
 	}
-	if strings.ToLower(p.HashName) != algo {
-		return fmt.Errorf("algorithm mismatch: param %s superblock %s", p.HashName, algo)
+
+	if !isHashAlgorithmSupported(p.HashName) {
+		return fmt.Errorf("verity: hash algorithm %s not supported", p.HashName)
 	}
+
 	if p.DataBlockSize == 0 {
 		p.DataBlockSize = sb.DataBlockSize
 	} else if p.DataBlockSize != sb.DataBlockSize {
-		return fmt.Errorf("data block size mismatch: param %d sb %d", p.DataBlockSize, sb.DataBlockSize)
+		return fmt.Errorf("verity: data block size mismatch: param %d sb %d", p.DataBlockSize, sb.DataBlockSize)
 	}
+
 	if p.HashBlockSize == 0 {
 		p.HashBlockSize = sb.HashBlockSize
 	} else if p.HashBlockSize != sb.HashBlockSize {
-		return fmt.Errorf("hash block size mismatch: param %d sb %d", p.HashBlockSize, sb.HashBlockSize)
+		return fmt.Errorf("verity: hash block size mismatch: param %d sb %d", p.HashBlockSize, sb.HashBlockSize)
 	}
+
 	if p.DataBlocks == 0 {
 		p.DataBlocks = sb.DataBlocks
 	} else if p.DataBlocks != sb.DataBlocks {
-		return fmt.Errorf("data blocks mismatch: param %d sb %d", p.DataBlocks, sb.DataBlocks)
+		return fmt.Errorf("verity: data blocks mismatch: param %d sb %d", p.DataBlocks, sb.DataBlocks)
 	}
+
 	if len(p.Salt) == 0 {
 		p.Salt = make([]byte, sb.SaltSize)
 		copy(p.Salt, sb.Salt[:sb.SaltSize])
 		p.SaltSize = sb.SaltSize
 	} else {
 		if p.SaltSize != sb.SaltSize || !bytes.Equal(p.Salt, sb.Salt[:sb.SaltSize]) {
-			return fmt.Errorf("salt mismatch")
+			return fmt.Errorf("verity: salt mismatch")
 		}
 	}
+
+	p.HashType = sb.HashType
 	if p.UUID == ([16]byte{}) {
 		p.UUID = sb.UUID
 	} else if p.UUID != sb.UUID {
-		return fmt.Errorf("UUID mismatch")
+		return fmt.Errorf("verity: UUID mismatch")
 	}
-	p.HashAreaOffset = alignUp(VeritySuperblockSize, uint64(p.HashBlockSize))
+	p.NoSuperblock = false
+	p.HashAreaOffset = sbOffset
 	return nil
 }
 
-// AdoptParamsFromSuperblock validates the provided superblock and populates
-// the given VerityParams with values derived from it (algorithm, block sizes,
-// data blocks, salt, UUID, and HashAreaOffset). Returns error if incompatible.
-func AdoptParamsFromSuperblock(p *VerityParams, sb *VeritySuperblock) error {
-	return validateAndAdoptSuperblock(p, sb)
+func AdoptParamsFromSuperblock(p *VerityParams, sb *VeritySuperblock, sbOffset uint64) error {
+	return adoptParamsFromSuperblock(p, sb, sbOffset)
+}
+
+func isHashAlgorithmSupported(name string) bool {
+	h := map[string]crypto.Hash{
+		"sha1":   crypto.SHA1,
+		"sha256": crypto.SHA256,
+		"sha512": crypto.SHA512,
+	}
+	algo := strings.ToLower(strings.TrimSpace(name))
+	hash, ok := h[algo]
+	if !ok {
+		return false
+	}
+	return hash.Available()
 }

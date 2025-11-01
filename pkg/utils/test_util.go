@@ -66,7 +66,7 @@ func MakeTempFile(t *testing.T, size int64) string {
 		// Write some random bytes in first block to avoid all-zero special cases
 		buf := make([]byte, 4096)
 		if _, err := rand.Read(buf); err == nil {
-			_, _ = f.WriteAt(buf, 0)
+			_, _ = f.WriteSuperblock(buf, 0)
 		}
 	}
 	return f.Name()
