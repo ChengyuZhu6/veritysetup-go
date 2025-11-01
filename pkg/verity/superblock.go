@@ -13,16 +13,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	VeritySignature      = "verity\x00\x00"
-	VeritySuperblockSize = 512
-	VerityMaxHashType    = 1
-	VerityMaxLevels      = 63
-	VerityMaxDigestSize  = 1024
-	MaxSaltSize          = 256
-	diskSectorSize       = 512
-)
-
 var (
 	errInvalidSignature = errors.New("verity: invalid superblock signature")
 	errInvalidVersion   = errors.New("verity: unsupported superblock version")

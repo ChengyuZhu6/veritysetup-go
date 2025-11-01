@@ -1,5 +1,15 @@
 package verity
 
+const (
+	VeritySignature      = "verity\x00\x00"
+	VeritySuperblockSize = 512
+	VerityMaxHashType    = 1
+	VerityMaxLevels      = 63
+	VerityMaxDigestSize  = 1024
+	MaxSaltSize          = 256
+	diskSectorSize       = 512
+)
+
 // VerityParams holds parameters for verity hash tree computation and verification.
 type VerityParams struct {
 	HashName       string
