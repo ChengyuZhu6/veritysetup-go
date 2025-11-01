@@ -17,8 +17,12 @@ import (
 
 // runFormat performs the verity hash tree creation and prints header info.
 func runFormat(p *verity.VerityParams, dataPath, hashPath string) error {
-	vh := verity.NewVerityHash(p, dataPath, hashPath, nil)
-	if err := vh.Create(); err != nil {
+	creator, err := verity.NewCreator(p, dataPath, hashPath)
+	if err != nil {
+		return err
+	}
+	rootHash, err := creator.Create()
+	if err != nil {
 		return err
 	}
 
@@ -63,7 +67,7 @@ func runFormat(p *verity.VerityParams, dataPath, hashPath string) error {
 	fmt.Printf("Hash block size:        %d\n", p.HashBlockSize)
 	fmt.Printf("Hash algorithm:         %s\n", strings.ToLower(p.HashName))
 	fmt.Printf("Salt:                   %s\n", hex.EncodeToString(p.Salt))
-	fmt.Printf("Root hash:              %s\n", hex.EncodeToString(vh.RootHash()))
+	fmt.Printf("Root hash:              %s\n", hex.EncodeToString(rootHash))
 	fmt.Printf("Hash device size:       %d [bytes]\n", hashDeviceSize)
 	return nil
 }

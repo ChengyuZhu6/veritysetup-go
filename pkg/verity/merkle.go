@@ -1,17 +1,13 @@
 package verity
 
 import (
-	"bytes"
 	"crypto"
 	_ "crypto/sha1"
 	_ "crypto/sha256"
 	_ "crypto/sha512"
 	"fmt"
 	"io"
-	"log"
 	"os"
-
-	"golang.org/x/sys/unix"
 )
 
 type VerityHash struct {
@@ -53,86 +49,75 @@ func NewVerityHash(p *VerityParams, dataDevice, hashDevice string, rootHash []by
 	return vh
 }
 
-func (vh *VerityHash) Verify() error {
-	if err := vh.validateParams(); err != nil {
-		return err
-	}
-	return vh.createOrVerifyHash(true)
+func (vh *VerityHash) RootHash() []byte {
+	out := make([]byte, len(vh.rootHash))
+	copy(out, vh.rootHash)
+	return out
 }
 
-func (vh *VerityHash) Create() error {
-	if err := vh.validateParams(); err != nil {
-		return err
+func getBitsUp(u uint32) uint {
+	var i uint
+	for (1 << i) < u {
+		i++
 	}
-	return vh.createOrVerifyHash(false)
+	return i
 }
 
-func (vh *VerityHash) validateParams() error {
-	if vh.params.SaltSize > 256 {
-		return fmt.Errorf("salt size %d exceeds maximum of 256 bytes", vh.params.SaltSize)
+func getBitsDown(u uint32) uint {
+	var i uint
+	for (u >> i) > 1 {
+		i++
 	}
-
-	digestSize := vh.hashFunc.Size()
-	if digestSize > VerityMaxDigestSize {
-		return fmt.Errorf("digest size %d exceeds maximum of %d bytes", digestSize, VerityMaxDigestSize)
-	}
-
-	if uint64MultOverflow(vh.params.DataBlocks, uint64(vh.params.DataBlockSize)) {
-		return fmt.Errorf("data device offset overflow: %d blocks * %d bytes",
-			vh.params.DataBlocks, vh.params.DataBlockSize)
-	}
-
-	pageSize := uint32(unix.Getpagesize())
-	if vh.params.DataBlockSize > pageSize {
-		log.Printf("WARNING: Kernel cannot activate device if data block size (%d) exceeds page size (%d)",
-			vh.params.DataBlockSize, pageSize)
-	}
-
-	return nil
+	return i
 }
 
-func (vh *VerityHash) calculateHashLevels() ([]hashTreeLevel, error) {
-	hashSize := uint32(vh.hashFunc.Size())
-	digestSizeFull := vh.getDigestSizeFull(hashSize)
-	hashesPerBlock := vh.params.HashBlockSize / digestSizeFull
-
-	if hashesPerBlock == 0 {
-		return nil, fmt.Errorf("hash block size %d is too small for digest size %d",
-			vh.params.HashBlockSize, digestSizeFull)
+func (vh *VerityHash) hashLevels(dataFileBlocks uint64) ([]hashTreeLevel, error) {
+	digestSize := uint32(vh.hashFunc.Size())
+	if digestSize == 0 {
+		return nil, fmt.Errorf("invalid digest size")
 	}
 
-	var levels []hashTreeLevel
-	remainingHashes := vh.params.DataBlocks
+	hashPerBlockBits := getBitsDown(vh.params.HashBlockSize / digestSize)
+	if hashPerBlockBits == 0 {
+		return nil, fmt.Errorf("hash block size too small for digest")
+	}
 
-	for remainingHashes > 0 {
-		if len(levels) >= VerityMaxLevels {
-			return nil, fmt.Errorf("hash tree exceeds maximum levels: %d", len(levels))
+	numLevels := 0
+	for hashPerBlockBits*uint(numLevels) < 64 &&
+		((dataFileBlocks-1)>>(hashPerBlockBits*uint(numLevels))) > 0 {
+		numLevels++
+	}
+
+	if numLevels > VerityMaxLevels {
+		return nil, fmt.Errorf("hash tree exceeds maximum levels: %d", numLevels)
+	}
+
+	levels := make([]hashTreeLevel, numLevels)
+	hashPosition := vh.params.HashAreaOffset / uint64(vh.params.HashBlockSize)
+
+	for i := numLevels - 1; i >= 0; i-- {
+		levels[i].offset = hashPosition * uint64(vh.params.HashBlockSize)
+
+		sShift := uint((i + 1) * int(hashPerBlockBits))
+		if sShift > 63 {
+			return nil, fmt.Errorf("shift overflow at level %d", i)
 		}
+		s := (dataFileBlocks + (1 << sShift) - 1) >> sShift
+		levels[i].numBlocks = s
+		levels[i].numHashes = dataFileBlocks
 
-		numBlocks := (remainingHashes + uint64(hashesPerBlock) - 1) / uint64(hashesPerBlock)
-		levels = append(levels, hashTreeLevel{
-			numHashes: remainingHashes,
-			numBlocks: numBlocks,
-		})
-
-		if remainingHashes == 1 {
-			break
+		if hashPosition+s < hashPosition {
+			return nil, fmt.Errorf("hash position overflow")
 		}
-		remainingHashes = numBlocks
+		hashPosition += s
 	}
-
-	nextOffset := vh.params.HashAreaOffset
-	for i := len(levels) - 2; i >= 0; i-- {
-		levels[i].offset = nextOffset
-		nextOffset += levels[i].numBlocks * uint64(vh.params.HashBlockSize)
-	}
-	levels[len(levels)-1].offset = 0
 
 	return levels, nil
 }
 
 func (vh *VerityHash) verifyHashBlock(data, salt []byte) ([]byte, error) {
 	h := vh.hashFunc.New()
+
 	if vh.params.HashType == 1 {
 		if len(salt) > 0 {
 			h.Write(salt)
@@ -144,207 +129,16 @@ func (vh *VerityHash) verifyHashBlock(data, salt []byte) ([]byte, error) {
 			h.Write(salt)
 		}
 	}
+
 	return h.Sum(nil), nil
 }
 
-func uint64MultOverflow(a uint64, b uint64) bool {
-	if b == 0 {
-		return false
-	}
-	result := a * b
-	if result/b != a {
-		return true
-	}
-	return false
-}
-
-func readBlock(f *os.File, offset uint64, size uint32) ([]byte, error) {
-	buf := make([]byte, size)
-	if _, err := f.Seek(int64(offset), io.SeekStart); err != nil {
-		return nil, err
-	}
-	_, err := io.ReadFull(f, buf)
-	return buf, err
-}
-
-func writeBlock(f *os.File, offset uint64, data []byte) error {
-	if _, err := f.Seek(int64(offset), io.SeekStart); err != nil {
-		return err
-	}
-	_, err := f.Write(data)
-	return err
-}
-
-func (vh *VerityHash) createOrVerifyHash(verify bool) error {
-	dataFile, hashFile, err := vh.openDeviceFiles(verify)
-	if err != nil {
-		return fmt.Errorf("failed to open device files: %w", err)
-	}
-	defer dataFile.Close()
-	defer hashFile.Close()
-
-	if err := vh.prepareHashArea(hashFile, verify); err != nil {
-		return err
-	}
-
-	levels, err := vh.calculateHashLevels()
-	if err != nil {
-		return fmt.Errorf("failed to calculate hash levels: %w", err)
-	}
-
-	if !verify {
-		var totalBytes uint64
-		for i := 0; i < len(levels)-1; i++ {
-			totalBytes += levels[i].numBlocks * uint64(vh.params.HashBlockSize)
-		}
-		if err := hashFile.Truncate(int64(vh.params.HashAreaOffset + totalBytes)); err != nil {
-			return fmt.Errorf("preallocate hash file: %w", err)
+func verifyZero(block []byte, offset uint64) error {
+	for i, b := range block {
+		if b != 0 {
+			return fmt.Errorf("spare area is not zeroed at position %d", offset+uint64(i))
 		}
 	}
-
-	hashBuffers := vh.createHashBuffers(levels)
-	currentHash, err := vh.processHashLevels(levels, hashBuffers, dataFile, hashFile, verify)
-	if err != nil {
-		return err
-	}
-
-	return vh.finalizeRootHash(currentHash, verify)
-}
-
-func (vh *VerityHash) prepareHashArea(hashFile *os.File, verify bool) error {
-	if vh.params.NoSuperblock {
-		if vh.params.HashAreaOffset%uint64(vh.params.HashBlockSize) != 0 {
-			return fmt.Errorf("hash area offset %d not aligned to hash block size %d",
-				vh.params.HashAreaOffset, vh.params.HashBlockSize)
-		}
-		return nil
-	}
-
-	if verify {
-		sbData, err := readBlock(hashFile, 0, VeritySuperblockSize)
-		if err != nil {
-			return fmt.Errorf("read superblock: %w", err)
-		}
-		sb, err := DeserializeSuperblock(sbData)
-		if err != nil {
-			return err
-		}
-		return validateAndAdoptSuperblock(vh.params, sb)
-	}
-
-	sb, err := buildSuperblockFromParams(vh.params)
-	if err != nil {
-		return err
-	}
-	data, err := sb.Serialize()
-	if err != nil {
-		return err
-	}
-	if err := writeBlock(hashFile, 0, data); err != nil {
-		return fmt.Errorf("write superblock: %w", err)
-	}
-	vh.params.HashAreaOffset = alignUp(VeritySuperblockSize, uint64(vh.params.HashBlockSize))
-	return nil
-}
-
-func (vh *VerityHash) openDeviceFiles(verify bool) (*os.File, *os.File, error) {
-	dataFile, err := os.OpenFile(vh.dataDevice, os.O_RDONLY, 0)
-	if err != nil {
-		return nil, nil, fmt.Errorf("cannot open data device: %w", err)
-	}
-
-	hashFlag := os.O_RDWR
-	if verify {
-		hashFlag = os.O_RDONLY
-	}
-
-	hashFile, err := os.OpenFile(vh.hashDevice, hashFlag, 0)
-	if err != nil {
-		dataFile.Close()
-		return nil, nil, fmt.Errorf("cannot open hash device: %w", err)
-	}
-
-	return dataFile, hashFile, nil
-}
-
-func (vh *VerityHash) createHashBuffers(levels []hashTreeLevel) [][]byte {
-	hashSize := vh.hashFunc.Size()
-	hashBuffers := make([][]byte, len(levels))
-	for i := range hashBuffers {
-		hashBuffers[i] = make([]byte, int(levels[i].numHashes)*hashSize)
-	}
-	return hashBuffers
-}
-
-func (vh *VerityHash) processHashLevels(levels []hashTreeLevel, hashBuffers [][]byte, dataFile, hashFile *os.File, verify bool) ([]byte, error) {
-	hashSize := uint32(vh.hashFunc.Size())
-	digestSizeFull := vh.getDigestSizeFull(hashSize)
-	hashesPerBlock := vh.params.HashBlockSize / digestSizeFull
-	currentHash := make([]byte, int(hashSize))
-
-	for level := 0; level < len(levels); level++ {
-		isLastLevel := level == len(levels)-1
-		for blockIdx := uint64(0); blockIdx < levels[level].numBlocks; blockIdx++ {
-			if err := vh.processHashBlock(level, blockIdx, levels, hashBuffers, dataFile, hashFile, verify, currentHash, hashesPerBlock, hashSize, digestSizeFull, isLastLevel); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return currentHash, nil
-}
-
-func (vh *VerityHash) processHashBlock(level int, blockIdx uint64, levels []hashTreeLevel, hashBuffers [][]byte, dataFile, hashFile *os.File, verify bool, currentHash []byte, hashesPerBlock, hashSize, digestSizeFull uint32, isLastLevel bool) error {
-	hashBlock := make([]byte, vh.params.HashBlockSize)
-	hashBlockPos := uint64(0)
-
-	startHashIdx := blockIdx * uint64(hashesPerBlock)
-	endHashIdx := startHashIdx + uint64(hashesPerBlock)
-	if endHashIdx > levels[level].numHashes {
-		endHashIdx = levels[level].numHashes
-	}
-
-	for hashIdx := startHashIdx; hashIdx < endHashIdx; hashIdx++ {
-		var blockData []byte
-		var err error
-
-		if level == 0 {
-			blockData, err = readBlock(dataFile, hashIdx*uint64(vh.params.DataBlockSize), vh.params.DataBlockSize)
-		} else {
-			prevLevelOffset := levels[level-1].offset + hashIdx*uint64(vh.params.HashBlockSize)
-			blockData, err = readBlock(hashFile, prevLevelOffset, vh.params.HashBlockSize)
-		}
-		if err != nil {
-			return err
-		}
-
-		hash, err := vh.verifyHashBlock(blockData, vh.params.Salt)
-		if err != nil {
-			return fmt.Errorf("failed to calculate hash at level %d hash %d: %w", level, hashIdx, err)
-		}
-
-		copy(hashBuffers[level][hashIdx*uint64(hashSize):], hash)
-		copy(currentHash, hash)
-
-		copy(hashBlock[hashBlockPos:], hash)
-		hashBlockPos += uint64(hashSize)
-		if vh.params.HashType == 1 {
-			hashBlockPos += uint64(digestSizeFull - hashSize)
-		}
-	}
-
-	if !isLastLevel {
-		offset := levels[level].offset + blockIdx*uint64(vh.params.HashBlockSize)
-		if verify {
-			if err := vh.verifyHashBlockData(hashFile, offset, hashBlock, hashBlockPos); err != nil {
-				return fmt.Errorf("verification failed at level %d block %d: %w", level, blockIdx, err)
-			}
-		} else {
-			if err := writeBlock(hashFile, offset, hashBlock); err != nil {
-				return fmt.Errorf("failed to write hash block at level %d block %d: %w", level, blockIdx, err)
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -364,36 +158,236 @@ func (vh *VerityHash) getDigestSizeFull(hashSize uint32) uint32 {
 	return n + 1
 }
 
-func (vh *VerityHash) verifyHashBlockData(hashFile *os.File, offset uint64, expectedBlock []byte, dataLen uint64) error {
-	storedBlock, err := readBlock(hashFile, offset, vh.params.HashBlockSize)
-	if err != nil {
-		return fmt.Errorf("failed to read stored hash block: %w", err)
+func (vh *VerityHash) createOrVerify(
+	rd, wr *os.File,
+	dataBlock uint64, dataBlockSize uint32,
+	hashBlock uint64, hashBlockSize uint32,
+	blocks uint64,
+	verify bool,
+	calculatedDigest []byte,
+) error {
+	digestSize := uint32(vh.hashFunc.Size())
+	if digestSize > VerityMaxDigestSize {
+		return fmt.Errorf("digest size exceeds maximum")
 	}
 
-	if !bytes.Equal(expectedBlock[:dataLen], storedBlock[:dataLen]) {
-		return fmt.Errorf("hash block data mismatch")
+	digestSizeFull := vh.getDigestSizeFull(digestSize)
+	hashPerBlock := uint32(1 << getBitsDown(hashBlockSize/digestSizeFull))
+	blocksToWrite := (blocks + uint64(hashPerBlock) - 1) / uint64(hashPerBlock)
+
+	seekRd := dataBlock * uint64(dataBlockSize)
+	if _, err := rd.Seek(int64(seekRd), io.SeekStart); err != nil {
+		return fmt.Errorf("cannot seek data device: %w", err)
 	}
 
-	for i := dataLen; i < uint64(vh.params.HashBlockSize); i++ {
-		if storedBlock[i] != 0 {
-			return fmt.Errorf("spare area is not zeroed at position %d", i)
+	if wr != nil {
+		seekWr := hashBlock * uint64(hashBlockSize)
+		if _, err := wr.Seek(int64(seekWr), io.SeekStart); err != nil {
+			return fmt.Errorf("cannot seek hash device: %w", err)
 		}
 	}
+
+	leftBlock := make([]byte, hashBlockSize)
+	dataBuffer := make([]byte, dataBlockSize)
+
+	for blocksToWrite > 0 {
+		blocksToWrite--
+		leftBytes := hashBlockSize
+
+		for i := uint32(0); i < hashPerBlock; i++ {
+			if blocks == 0 {
+				break
+			}
+			blocks--
+
+			if _, err := io.ReadFull(rd, dataBuffer); err != nil {
+				return fmt.Errorf("cannot read data block: %w", err)
+			}
+
+			hash, err := vh.verifyHashBlock(dataBuffer, vh.params.Salt)
+			if err != nil {
+				return fmt.Errorf("hash calculation failed: %w", err)
+			}
+			copy(calculatedDigest, hash)
+
+			if wr == nil {
+				break
+			}
+
+			if verify {
+				readDigest := make([]byte, digestSize)
+				if _, err := io.ReadFull(wr, readDigest); err != nil {
+					return fmt.Errorf("cannot read digest from hash device: %w", err)
+				}
+				if !bytesEqual(readDigest, calculatedDigest[:digestSize]) {
+					return fmt.Errorf("verification failed at data position %d", seekRd)
+				}
+			} else {
+				if _, err := wr.Write(calculatedDigest[:digestSize]); err != nil {
+					return fmt.Errorf("cannot write digest to hash device: %w", err)
+				}
+			}
+
+			if vh.params.HashType == 0 {
+				leftBytes -= digestSize
+			} else {
+				padding := digestSizeFull - digestSize
+				if padding > 0 {
+					if verify {
+						padBuf := make([]byte, padding)
+						if _, err := io.ReadFull(wr, padBuf); err != nil {
+							return fmt.Errorf("cannot read padding: %w", err)
+						}
+						if err := verifyZero(padBuf, seekRd); err != nil {
+							return err
+						}
+					} else {
+						if _, err := wr.Write(leftBlock[:padding]); err != nil {
+							return fmt.Errorf("cannot write padding: %w", err)
+						}
+					}
+				}
+				leftBytes -= digestSizeFull
+			}
+		}
+
+		if wr != nil && leftBytes > 0 {
+			if verify {
+				spareBuf := make([]byte, leftBytes)
+				if _, err := io.ReadFull(wr, spareBuf); err != nil {
+					return fmt.Errorf("cannot read spare area: %w", err)
+				}
+				if err := verifyZero(spareBuf, seekRd); err != nil {
+					return err
+				}
+			} else {
+				if _, err := wr.Write(leftBlock[:leftBytes]); err != nil {
+					return fmt.Errorf("cannot write spare area: %w", err)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
-func (vh *VerityHash) finalizeRootHash(currentHash []byte, verify bool) error {
-	if verify && !bytes.Equal(currentHash, vh.rootHash) {
-		return fmt.Errorf("root hash verification failed")
+func (vh *VerityHash) createOrVerifyHashTree(verify bool) error {
+	digestSize := uint32(vh.hashFunc.Size())
+	if digestSize > VerityMaxDigestSize {
+		return fmt.Errorf("digest size exceeds maximum")
 	}
-	if !verify {
-		copy(vh.rootHash, currentHash)
+
+	dataFileBlocks := vh.params.DataBlocks
+
+	levels, err := vh.hashLevels(dataFileBlocks)
+	if err != nil {
+		return fmt.Errorf("failed to calculate hash levels: %w", err)
 	}
+
+	dataFile, err := os.Open(vh.dataDevice)
+	if err != nil {
+		return fmt.Errorf("cannot open data device %s: %w", vh.dataDevice, err)
+	}
+	defer dataFile.Close()
+
+	hashFile, err := os.OpenFile(vh.hashDevice, os.O_RDWR, 0)
+	if verify {
+		hashFile, err = os.Open(vh.hashDevice)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot open hash device %s: %w", vh.hashDevice, err)
+	}
+	defer hashFile.Close()
+
+	calculatedDigest := make([]byte, digestSize)
+
+	for i := 0; i < len(levels); i++ {
+		var rd, wr *os.File
+		var dataBlock, hashBlock uint64
+		var dataBlockSize, hashBlockSize uint32
+		var blocks uint64
+
+		if i == 0 {
+			rd = dataFile
+			wr = hashFile
+			dataBlock = 0
+			dataBlockSize = vh.params.DataBlockSize
+			hashBlock = levels[i].offset / uint64(vh.params.HashBlockSize)
+			hashBlockSize = vh.params.HashBlockSize
+			blocks = dataFileBlocks
+		} else {
+			hashFile2, err := os.Open(vh.hashDevice)
+			if err != nil {
+				return fmt.Errorf("cannot open hash device for reading: %w", err)
+			}
+			rd = hashFile2
+			wr = hashFile
+			dataBlock = levels[i-1].offset / uint64(vh.params.HashBlockSize)
+			dataBlockSize = vh.params.HashBlockSize
+			hashBlock = levels[i].offset / uint64(vh.params.HashBlockSize)
+			hashBlockSize = vh.params.HashBlockSize
+			blocks = levels[i-1].numBlocks
+
+			err = vh.createOrVerify(rd, wr, dataBlock, dataBlockSize, hashBlock, hashBlockSize, blocks, verify, calculatedDigest)
+			hashFile2.Close()
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := vh.createOrVerify(rd, wr, dataBlock, dataBlockSize, hashBlock, hashBlockSize, blocks, verify, calculatedDigest); err != nil {
+			return err
+		}
+	}
+
+	if len(levels) > 0 {
+		lastLevel := levels[len(levels)-1]
+		hashFile2, err := os.Open(vh.hashDevice)
+		if err != nil {
+			return fmt.Errorf("cannot open hash device for root: %w", err)
+		}
+		defer hashFile2.Close()
+
+		err = vh.createOrVerify(
+			hashFile2, nil,
+			lastLevel.offset/uint64(vh.params.HashBlockSize), vh.params.HashBlockSize,
+			0, vh.params.HashBlockSize,
+			1, verify, calculatedDigest,
+		)
+		if err != nil {
+			return err
+		}
+	} else {
+		err = vh.createOrVerify(
+			dataFile, nil,
+			0, vh.params.DataBlockSize,
+			0, vh.params.HashBlockSize,
+			dataFileBlocks, verify, calculatedDigest,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	if verify {
+		if !bytesEqual(vh.rootHash, calculatedDigest[:digestSize]) {
+			return fmt.Errorf("root hash verification failed")
+		}
+	} else {
+		copy(vh.rootHash, calculatedDigest[:digestSize])
+	}
+
 	return nil
 }
 
-func (vh *VerityHash) RootHash() []byte {
-	out := make([]byte, len(vh.rootHash))
-	copy(out, vh.rootHash)
-	return out
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var diff byte
+	for i := range a {
+		diff |= a[i] ^ b[i]
+	}
+	return diff == 0
 }
