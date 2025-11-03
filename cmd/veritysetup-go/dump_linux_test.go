@@ -101,7 +101,9 @@ func TestDump_CorruptedSuperblock(t *testing.T) {
 	defer os.Remove(hash)
 
 	f, _ := os.OpenFile(hash, os.O_WRONLY, 0644)
-	f.Write(make([]byte, 4096))
+	if _, err := f.Write(make([]byte, 4096)); err != nil {
+		t.Fatalf("Failed to write test data: %v", err)
+	}
 	f.Close()
 
 	err := runDump(hash)

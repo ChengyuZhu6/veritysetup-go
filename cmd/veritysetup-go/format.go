@@ -8,9 +8,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
 	verity "github.com/ChengyuZhu6/veritysetup-go/pkg/verity"
-	"github.com/google/uuid"
 )
 
 func runFormat(p *verity.VerityParams, dataPath, hashPath string) error {

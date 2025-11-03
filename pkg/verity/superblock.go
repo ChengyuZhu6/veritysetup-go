@@ -10,8 +10,9 @@ import (
 	"math"
 	"strings"
 
-	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
 	"github.com/google/uuid"
+
+	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
 )
 
 var (
@@ -246,7 +247,7 @@ func adoptParamsFromSuperblock(p *VerityParams, sb *VeritySuperblock, sbOffset u
 
 	if p.HashName == "" {
 		p.HashName = algo
-	} else if strings.ToLower(p.HashName) != algo {
+	} else if !strings.EqualFold(p.HashName, algo) {
 		return fmt.Errorf("verity: algorithm mismatch: param %s superblock %s", p.HashName, algo)
 	}
 

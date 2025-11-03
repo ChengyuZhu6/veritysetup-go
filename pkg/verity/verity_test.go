@@ -10,8 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
 	"github.com/google/uuid"
+
+	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
 )
 
 func TestGetHashSize(t *testing.T) {
@@ -219,7 +220,7 @@ func TestSuperblockRoundTrip(t *testing.T) {
 		t.Fatalf("UUIDString failed: %v", err)
 	}
 
-	if strings.ToLower(readUUID) != strings.ToLower(uuidStr) {
+	if !strings.EqualFold(readUUID, uuidStr) {
 		t.Errorf("UUID mismatch: written=%s, read=%s", uuidStr, readUUID)
 	}
 	if readParams.HashName != params.HashName {
@@ -308,7 +309,9 @@ func TestVerityCreateWithVeritysetup(t *testing.T) {
 				parsedUUID2, _ := uuid.Parse(uuidStr)
 				copy(params.UUID[:], parsedUUID2[:])
 				sb, _ := buildSuperblockFromParams(params)
-				sb.WriteSuperblock(hashFile, 0)
+				if err := sb.WriteSuperblock(hashFile, 0); err != nil {
+					t.Fatalf("Failed to write superblock: %v", err)
+				}
 				hashFile.Close()
 
 				rootHashGo, err = VerityCreate(params, dataPath, hashPathGo)
@@ -398,7 +401,9 @@ func TestVerityVerifyWithVeritysetup(t *testing.T) {
 				parsedUUID2, _ := uuid.Parse(uuidStr)
 				copy(params.UUID[:], parsedUUID2[:])
 				sb, _ := buildSuperblockFromParams(params)
-				sb.WriteSuperblock(hashFile, 0)
+				if err := sb.WriteSuperblock(hashFile, 0); err != nil {
+					t.Fatalf("Failed to write superblock: %v", err)
+				}
 				hashFile.Close()
 
 				rootHash, err = VerityCreate(params, dataPath, hashPath)
@@ -484,7 +489,9 @@ func TestCrossVerificationWithVeritysetup(t *testing.T) {
 				hashTreeOnly := hashContent[4096:]
 				hashPathStripped := createTestHashFile(t, int64(len(hashTreeOnly)))
 				defer os.Remove(hashPathStripped)
-				os.WriteFile(hashPathStripped, hashTreeOnly, 0644)
+				if err := os.WriteFile(hashPathStripped, hashTreeOnly, 0644); err != nil {
+					t.Fatalf("Failed to write stripped hash file: %v", err)
+				}
 
 				if err := VerityVerify(params, dataPath, hashPathStripped, rootHashCBytes); err != nil {
 					t.Errorf("Go failed to verify veritysetup hash tree: %v", err)
@@ -542,7 +549,9 @@ func TestDataCorruptionDetection(t *testing.T) {
 			}
 
 			dataFile, _ := os.OpenFile(dataPath, os.O_RDWR, 0)
-			dataFile.WriteAt([]byte{0xFF, 0xFF, 0xFF, 0xFF}, 0)
+			if _, err := dataFile.WriteAt([]byte{0xFF, 0xFF, 0xFF, 0xFF}, 0); err != nil {
+				t.Fatalf("Failed to write corrupted data: %v", err)
+			}
 			dataFile.Close()
 
 			if err := VerityVerify(params, dataPath, hashPath, rootHash); err == nil {
@@ -557,7 +566,9 @@ func TestDataCorruptionDetection(t *testing.T) {
 			rootHash2, _ := VerityCreate(params, dataPath2, hashPath2)
 
 			dataFile2, _ := os.OpenFile(dataPath2, os.O_RDWR, 0)
-			dataFile2.WriteAt([]byte{0xAA, 0xBB, 0xCC, 0xDD}, int64(tt.numBlocks/2)*4096)
+			if _, err := dataFile2.WriteAt([]byte{0xAA, 0xBB, 0xCC, 0xDD}, int64(tt.numBlocks/2)*4096); err != nil {
+				t.Fatalf("Failed to write corrupted data: %v", err)
+			}
 			dataFile2.Close()
 
 			if err := VerityVerify(params, dataPath2, hashPath2, rootHash2); err == nil {
@@ -604,7 +615,9 @@ func TestHashTreeCorruptionDetection(t *testing.T) {
 			}
 
 			hashFile, _ := os.OpenFile(hashPath, os.O_RDWR, 0)
-			hashFile.WriteAt([]byte{0xFF, 0xFF, 0xFF, 0xFF}, 100)
+			if _, err := hashFile.WriteAt([]byte{0xFF, 0xFF, 0xFF, 0xFF}, 100); err != nil {
+				t.Fatalf("Failed to write corrupted hash: %v", err)
+			}
 			hashFile.Close()
 
 			if err := VerityVerify(params, dataPath, hashPath, rootHash); err == nil {
