@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/google/uuid"
+
 	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
 	verity "github.com/ChengyuZhu6/veritysetup-go/pkg/verity"
-	"github.com/google/uuid"
 )
 
 func parseVerifyArgs(args []string) (*verity.VerityParams, string, string, []byte, error) {

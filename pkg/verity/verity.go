@@ -9,8 +9,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
 	"golang.org/x/sys/unix"
+
+	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
 )
 
 func validateParams(params *VerityParams, digestSize int) error {

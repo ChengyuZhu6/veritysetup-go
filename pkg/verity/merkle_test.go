@@ -270,7 +270,9 @@ func TestManualHashTreeVerification(t *testing.T) {
 			t.Fatalf("failed to write data: %v", err)
 		}
 	}
-	dataPath.Sync()
+	if err := dataPath.Sync(); err != nil {
+		t.Fatalf("Failed to sync data file: %v", err)
+	}
 	dataPath.Close()
 
 	hashPath := createTestHashFile(t, int64(hashBlockSize*uint32(numBlocks)))
