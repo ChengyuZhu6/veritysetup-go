@@ -127,6 +127,20 @@ func (vh *VerityHash) hashLevels(dataFileBlocks uint64) ([]hashTreeLevel, error)
 	return levels, nil
 }
 
+func (vh *VerityHash) GetHashTreeSize() (uint64, error) {
+	levels, err := vh.hashLevels(vh.dataBlocks)
+	if err != nil {
+		return 0, err
+	}
+
+	totalHashBlocks := uint64(0)
+	for _, level := range levels {
+		totalHashBlocks += level.numBlocks
+	}
+
+	return totalHashBlocks * uint64(vh.hashBlockSize), nil
+}
+
 func (vh *VerityHash) verifyHashBlock(data, salt []byte) ([]byte, error) {
 	h := vh.hashFunc.New()
 

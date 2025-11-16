@@ -703,3 +703,86 @@ func TestBoundaryConditions(t *testing.T) {
 		})
 	}
 }
+
+func TestGetHashTreeSize(t *testing.T) {
+	tests := []struct {
+		name          string
+		numBlocks     uint64
+		hashAlgo      string
+		dataBlockSize uint32
+		hashBlockSize uint32
+	}{
+		{"sha256 16 blocks 4K", 16, "sha256", 4096, 4096},
+		{"sha256 128 blocks 4K", 128, "sha256", 4096, 4096},
+		{"sha256 256 blocks 4K", 256, "sha256", 4096, 4096},
+		{"sha512 16 blocks 4K", 16, "sha512", 4096, 4096},
+		{"sha512 64 blocks 4K", 64, "sha512", 4096, 4096},
+		{"sha1 32 blocks 4K", 32, "sha1", 4096, 4096},
+
+		{"sha256 64 blocks 512B", 64, "sha256", 512, 512},
+		{"sha256 128 blocks 512B", 128, "sha256", 512, 512},
+		{"sha512 32 blocks 512B", 32, "sha512", 512, 512},
+		{"sha1 64 blocks 512B", 64, "sha1", 512, 512},
+
+		{"sha256 100 blocks data512B hash4K", 100, "sha256", 512, 4096},
+		{"sha256 200 blocks data4K hash512B", 200, "sha256", 4096, 512},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataPath, _ := createTestDataFile(t, tt.dataBlockSize, tt.numBlocks)
+			defer os.Remove(dataPath)
+
+			params := &VerityParams{
+				HashName:       tt.hashAlgo,
+				DataBlockSize:  tt.dataBlockSize,
+				HashBlockSize:  tt.hashBlockSize,
+				DataBlocks:     tt.numBlocks,
+				HashType:       1,
+				Salt:           []byte("test-salt"),
+				SaltSize:       9,
+				HashAreaOffset: 0,
+				NoSuperblock:   true,
+			}
+
+			expectedSize, err := GetHashTreeSize(params)
+			if err != nil {
+				t.Fatalf("GetHashTreeSize failed: %v", err)
+			}
+
+			hashPath := createTestHashFile(t, int64(expectedSize))
+			defer os.Remove(hashPath)
+
+			_, err = VerityCreate(params, dataPath, hashPath)
+			if err != nil {
+				t.Fatalf("VerityCreate failed: %v", err)
+			}
+
+			hashData, err := os.ReadFile(hashPath)
+			if err != nil {
+				t.Fatalf("Failed to read hash file: %v", err)
+			}
+
+			actualUsed := uint64(0)
+			for i := len(hashData) - 1; i >= 0; i-- {
+				if hashData[i] != 0 {
+					actualUsed = uint64(i + 1)
+					break
+				}
+			}
+
+			if actualUsed > expectedSize {
+				t.Errorf("Actual hash data size %d exceeds calculated size %d", actualUsed, expectedSize)
+			}
+
+			rootHash, err := VerityCreate(params, dataPath, hashPath)
+			if err != nil {
+				t.Fatalf("VerityCreate failed on second run: %v", err)
+			}
+
+			if err := VerityVerify(params, dataPath, hashPath, rootHash); err != nil {
+				t.Errorf("VerityVerify failed: %v", err)
+			}
+		})
+	}
+}

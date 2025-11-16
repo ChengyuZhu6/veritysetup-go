@@ -350,3 +350,65 @@ func TestHashTreeStructure(t *testing.T) {
 		t.Errorf("verification failed: %v", err)
 	}
 }
+
+func TestVerityHashGetHashTreeSize(t *testing.T) {
+	tests := []struct {
+		name          string
+		dataBlocks    uint64
+		hashAlgo      string
+		dataBlockSize uint32
+		hashBlockSize uint32
+	}{
+		{"sha256 16 blocks 4K", 16, "sha256", 4096, 4096},
+		{"sha256 128 blocks 4K", 128, "sha256", 4096, 4096},
+		{"sha256 129 blocks 4K", 129, "sha256", 4096, 4096},
+		{"sha256 1024 blocks 4K", 1024, "sha256", 4096, 4096},
+		{"sha512 16 blocks 4K", 16, "sha512", 4096, 4096},
+		{"sha512 64 blocks 4K", 64, "sha512", 4096, 4096},
+		{"sha1 32 blocks 4K", 32, "sha1", 4096, 4096},
+		{"sha256 10000 blocks 4K", 10000, "sha256", 4096, 4096},
+
+		{"sha256 64 blocks 512B", 64, "sha256", 512, 512},
+		{"sha256 256 blocks 512B", 256, "sha256", 512, 512},
+		{"sha512 128 blocks 512B", 128, "sha512", 512, 512},
+		{"sha1 64 blocks 512B", 64, "sha1", 512, 512},
+
+		{"sha256 100 blocks data512B hash4K", 100, "sha256", 512, 4096},
+		{"sha256 200 blocks data4K hash512B", 200, "sha256", 4096, 512},
+		{"sha512 50 blocks data512B hash4K", 50, "sha512", 512, 4096},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vh := NewVerityHash(
+				tt.hashAlgo,
+				tt.dataBlockSize, tt.hashBlockSize,
+				tt.dataBlocks,
+				1,
+				nil, 0,
+				"", "",
+				nil,
+			)
+
+			calculatedSize, err := vh.GetHashTreeSize()
+			if err != nil {
+				t.Fatalf("CalculateHashTreeSize failed: %v", err)
+			}
+
+			levels, err := vh.hashLevels(tt.dataBlocks)
+			if err != nil {
+				t.Fatalf("hashLevels failed: %v", err)
+			}
+
+			expectedBlocks := uint64(0)
+			for _, level := range levels {
+				expectedBlocks += level.numBlocks
+			}
+			expectedSize := expectedBlocks * uint64(tt.hashBlockSize)
+
+			if calculatedSize != expectedSize {
+				t.Errorf("Size mismatch: calculated=%d, expected=%d", calculatedSize, expectedSize)
+			}
+		})
+	}
+}
