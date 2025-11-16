@@ -290,3 +290,26 @@ func DumpDevice(hashPath string) (string, error) {
 
 	return sb.String(), nil
 }
+
+func GetHashTreeSize(params *VerityParams) (uint64, error) {
+	if params == nil {
+		return 0, errors.New("verity: nil params")
+	}
+
+	if params.DataBlocks == 0 {
+		return 0, errors.New("data blocks must be greater than 0")
+	}
+
+	vh := NewVerityHash(
+		params.HashName,
+		params.DataBlockSize, params.HashBlockSize,
+		params.DataBlocks,
+		params.HashType,
+		nil,
+		0,
+		"", "",
+		nil,
+	)
+
+	return vh.GetHashTreeSize()
+}
