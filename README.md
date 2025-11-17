@@ -217,6 +217,7 @@ go test ./...
 - Superblock read/write operations
 - Block device size detection
 - Cross-validation with C veritysetup
+- Root hash signature verification
 
 #### Hash Algorithms
 - SHA1, SHA256 (default), SHA512
@@ -230,7 +231,6 @@ go test ./...
 - FEC (Forward Error Correction) support
 - Advanced error handling modes
 - Deferred device removal
-- Root hash signature verification
 - BLAKE2, SHA3 hash algorithms
 - Parallel hashing for performance
 

@@ -35,7 +35,7 @@ func main() {
 			log.Fatalf("verify: %v", err)
 		}
 	case "open":
-		p, dataDev, name, hashDev, rootDigest, flags, err := parseOpenArgs(os.Args[2:])
+		p, dataDev, name, hashDev, rootDigest, flags, signatureFile, err := parseOpenArgs(os.Args[2:])
 		if err != nil {
 			usage()
 			log.Fatalf("open: %v", err)
@@ -44,7 +44,7 @@ func main() {
 			log.Fatalf("open: %v", err)
 		}
 
-		if err := runOpen(p, dataDev, name, hashDev, rootDigest, flags); err != nil {
+		if err := runOpen(p, dataDev, name, hashDev, rootDigest, flags, signatureFile); err != nil {
 			log.Fatalf("open: %v", err)
 		}
 	case "close":
@@ -116,4 +116,5 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "  --data-blocks <n>                  Data blocks (override device size)\n")
 	fmt.Fprintf(os.Stderr, "  --no-superblock                    Hash device has no superblock\n")
 	fmt.Fprintf(os.Stderr, "  --hash-offset <bytes>              Hash area offset (when --no-superblock)\n")
+	fmt.Fprintf(os.Stderr, "  --root-hash-signature <file>       Path to root hash signature file\n")
 }
