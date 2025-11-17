@@ -7,17 +7,18 @@ import (
 )
 
 type OpenArgs struct {
-	Version        uint32 // verity target version, usually 1
-	DataDevice     string // path to data device
-	HashDevice     string // path to hash device
-	DataBlockSize  uint32 // bytes
-	HashBlockSize  uint32 // bytes
-	DataBlocks     uint64 // number of data blocks
-	HashName       string // sha256, sha1, sha512
-	RootDigest     []byte // root hash digest (binary)
-	Salt           []byte // salt (binary)
-	HashStartBytes uint64 // byte offset of hash area start on hash device
-	Flags          []string
+	Version            uint32
+	DataDevice         string
+	HashDevice         string
+	DataBlockSize      uint32
+	HashBlockSize      uint32
+	DataBlocks         uint64
+	HashName           string
+	RootDigest         []byte
+	Salt               []byte
+	HashStartBytes     uint64
+	Flags              []string
+	RootHashSigKeyDesc string
 }
 
 func BuildTargetParams(a OpenArgs) (string, error) {
@@ -63,8 +64,22 @@ func BuildTargetParams(a OpenArgs) (string, error) {
 		saltHex,
 	)
 
-	if len(a.Flags) > 0 {
-		b += " " + strings.Join(a.Flags, " ")
+	optionalCount := len(a.Flags)
+	if a.RootHashSigKeyDesc != "" {
+		optionalCount += 2
 	}
+
+	if optionalCount > 0 {
+		b += fmt.Sprintf(" %d", optionalCount)
+
+		for _, flag := range a.Flags {
+			b += " " + flag
+		}
+
+		if a.RootHashSigKeyDesc != "" {
+			b += fmt.Sprintf(" root_hash_sig_key_desc %s", a.RootHashSigKeyDesc)
+		}
+	}
+
 	return b, nil
 }

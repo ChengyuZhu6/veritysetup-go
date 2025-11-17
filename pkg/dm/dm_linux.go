@@ -37,14 +37,14 @@ const (
 
 // DM ioctl command numbers (subset) per <linux/dm-ioctl.h>.
 const (
-	DMDevCreateCMD  = 3 // DM_DEV_CREATE
-	DMDevRemoveCMD  = 4 // DM_DEV_REMOVE
-	DMDevSuspendCMD = 6 // DM_DEV_SUSPEND
-	DMDevStatusCMD  = 7 // DM_DEV_STATUS
-
-	DMTableLoadCMD   = 9  // DM_TABLE_LOAD
-	DMTableClearCMD  = 10 // DM_TABLE_CLEAR
-	DMTableStatusCMD = 12 // DM_TABLE_STATUS
+	DMDevCreateCMD    = 3  // DM_DEV_CREATE
+	DMDevRemoveCMD    = 4  // DM_DEV_REMOVE
+	DMDevSuspendCMD   = 6  // DM_DEV_SUSPEND
+	DMDevStatusCMD    = 7  // DM_DEV_STATUS
+	DMTableLoadCMD    = 9  // DM_TABLE_LOAD
+	DMTableClearCMD   = 10 // DM_TABLE_CLEAR
+	DMTableStatusCMD  = 12 // DM_TABLE_STATUS
+	DMListVersionsCMD = 13 // DM_LIST_VERSIONS
 )
 
 const (
@@ -82,6 +82,12 @@ type dmTargetSpec struct {
 	Status      int32
 	Next        uint32
 	TargetType  [DMMaxTypeName]byte
+}
+
+type dmTargetVersions struct {
+	Next    uint32
+	Version [3]uint32
+	Name    [DMMaxTypeName]byte
 }
 
 type Control struct {
@@ -324,3 +330,57 @@ func ioc(dir, typ, nr, size uintptr) uintptr {
 }
 
 func iowr(typ, nr, size uintptr) uintptr { return ioc(iocRead|iocWrite, typ, nr, size) }
+
+func CheckVeritySignatureSupport() error {
+	fd, err := os.OpenFile("/dev/mapper/control", os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open /dev/mapper/control: %w", err)
+	}
+	defer fd.Close()
+
+	bufSize := int(unsafe.Sizeof(dmIoctl{})) + 4096
+	buf := make([]byte, bufSize)
+	io := (*dmIoctl)(unsafe.Pointer(&buf[0]))
+	io.Version[0] = DMVersionMajor
+	io.Version[1] = DMVersionMinor
+	io.Version[2] = DMVersionPatch
+	io.DataSize = uint32(bufSize)
+	io.DataStart = uint32(unsafe.Sizeof(dmIoctl{}))
+
+	_, _, errno := ioctlSyscall(fd.Fd(), dmReq(DMListVersionsCMD), uintptr(unsafe.Pointer(io)))
+	if errno != 0 {
+		return fmt.Errorf("DM_LIST_VERSIONS ioctl failed: %w", errno)
+	}
+
+	offset := int(io.DataStart)
+	for offset < int(io.DataSize) {
+		if offset+int(unsafe.Sizeof(dmTargetVersions{})) > len(buf) {
+			break
+		}
+
+		tv := (*dmTargetVersions)(unsafe.Pointer(&buf[offset]))
+		nameLen := 0
+		for nameLen < len(tv.Name) && tv.Name[nameLen] != 0 {
+			nameLen++
+		}
+		name := string(tv.Name[:nameLen])
+
+		if name == "verity" {
+			major := tv.Version[0]
+			minor := tv.Version[1]
+
+			if major < 1 || (major == 1 && minor < 5) {
+				return fmt.Errorf("dm-verity signature not supported (requires >= 1.5.0, found %d.%d.%d)",
+					major, minor, tv.Version[2])
+			}
+			return nil
+		}
+
+		if tv.Next == 0 {
+			break
+		}
+		offset += int(tv.Next)
+	}
+
+	return fmt.Errorf("dm-verity target not found")
+}

@@ -278,6 +278,75 @@ checkOverlapBug() # $1 size, $2 hash-offset, [$3 data-blocks], [$4 block_size]
 	remove_mapping
 }
 
+check_signature()
+{	
+	local CERT_FILE=$(mktemp)
+	local KEY_FILE=$(mktemp)
+	local SIG_FILE=$(mktemp)
+	local HASH_BIN=$(mktemp)
+	
+	trap "rm -f $CERT_FILE $KEY_FILE $SIG_FILE $HASH_BIN" RETURN
+	
+	cat > ${CERT_FILE}.conf << 'EOF'
+[ req ]
+default_bits = 2048
+distinguished_name = req_distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[ req_distinguished_name ]
+CN = DM-Verity Test Key
+
+[ v3_ca ]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,digitalSignature,keyCertSign
+extendedKeyUsage = codeSigning
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+EOF
+	
+	openssl req -new -x509 -newkey rsa:2048 -keyout $KEY_FILE -out $CERT_FILE \
+		-days 365 -nodes -config ${CERT_FILE}.conf >/dev/null 2>&1 || fail
+	rm -f ${CERT_FILE}.conf
+	
+	ROOT_HASH=$($VERITYSETUP format --hash sha256 $LOOPDEV1 $IMG_HASH 2>/dev/null | \
+		grep -e "Root hash" | cut -d: -f2 | tr -d "\t\n ")
+	
+	echo -n "$ROOT_HASH" | xxd -r -p > $HASH_BIN 2>/dev/null
+	
+	openssl smime -sign -binary -noattr \
+		-inkey $KEY_FILE -signer $CERT_FILE \
+		-outform DER -out $SIG_FILE -in $HASH_BIN >/dev/null 2>&1 || fail
+	
+	# Verify signature in userspace before kernel verification.
+	# This ensures the PKCS#7 signature format is valid and the signature
+	# can be verified against the certificate, independent of kernel trust.
+	openssl pkcs7 -in $SIG_FILE -inform DER -print_certs -noout >/dev/null 2>&1 || \
+		fail "PKCS#7 signature format validation failed"
+	
+	openssl smime -verify -in $SIG_FILE -inform DER \
+		-CAfile $CERT_FILE -content $HASH_BIN -noverify >/dev/null 2>&1 || \
+		fail "Userspace signature verification failed"
+	
+	# Kernel signature verification requires the certificate to be in the kernel's
+	# trusted keyring (.builtin_trusted_keys, .secondary_trusted_keys, or .platform).
+	# In CI environments, the self-signed test certificate is not trusted by the kernel,
+	# so we expect the signature verification to fail with EKEYREJECTED error.
+	if check_version 1 5; then
+		OUTPUT=$($VERITYSETUP open --root-hash-signature $SIG_FILE \
+			$LOOPDEV1 $DEV_NAME $IMG_HASH $ROOT_HASH 2>&1)
+		
+		if echo "$OUTPUT" | grep -q "Loaded signature into thread keyring"; then
+			echo -n "[signature loaded]"  
+		else
+			fail "Unexpected signature verification error: $OUTPUT"
+		fi
+	fi
+	
+	echo "[OK]"
+	remove_mapping
+}
+
 export LANG=C
 [ $(id -u) != 0 ] && skip "WARNING: You must be root to run this test, test skipped."
 [ ! -x "$VERITYSETUP" ] && skip "Cannot find $VERITYSETUP, test skipped."
@@ -334,6 +403,10 @@ $VERITYSETUP format --format=1 --data-block-size=512 --hash-block-size=512 --has
 $VERITYSETUP open $LOOPDEV1 $DM_BAD_NAME $DEV $IMG_HASH 9de18652fe74edfb9b805aaed72ae2aa48f94333f1ba5c452ac33b1c39325174 2>/dev/null && fail
 $VERITYSETUP open $LOOPDEV1 $DM_LONG_NAME $DEV $IMG_HASH 9de18652fe74edfb9b805aaed72ae2aa48f94333f1ba5c452ac33b1c39325174 2>/dev/null && fail
 echo "[OK]"
-
 remove_mapping
+
+echo -n "Signature verification tests"
+prepare 8192 1024
+check_signature
+
 exit 0

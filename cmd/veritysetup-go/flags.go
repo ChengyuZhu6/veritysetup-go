@@ -19,6 +19,7 @@ type CommonFlags struct {
 	HashOffset    *uint64
 	UUIDStr       *string
 	FormatType    *uint
+	RootHashSig   *string
 }
 
 func defaultFlags(fs *flag.FlagSet) *CommonFlags {
@@ -32,6 +33,7 @@ func defaultFlags(fs *flag.FlagSet) *CommonFlags {
 		HashOffset:    fs.Uint64("hash-offset", 0, "hash area offset when no superblock"),
 		UUIDStr:       fs.String("uuid", "", "UUID (RFC4122)"),
 		FormatType:    fs.Uint("format", 1, "Format type (1 - normal, 0 - original Chrome OS)"),
+		RootHashSig:   fs.String("root-hash-signature", "", "Path to root hash signature file"),
 	}
 }
 
