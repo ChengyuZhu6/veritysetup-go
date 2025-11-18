@@ -786,3 +786,260 @@ func TestGetHashTreeSize(t *testing.T) {
 		})
 	}
 }
+
+func TestVerityOpen(t *testing.T) {
+	tests := []struct {
+		name         string
+		numBlocks    uint64
+		hashAlgo     string
+		useSalt      bool
+		noSuperblock bool
+	}{
+		{"sha256 no salt no superblock", 16, "sha256", false, true},
+		{"sha256 with salt no superblock", 16, "sha256", true, true},
+		{"sha512 no salt no superblock", 8, "sha512", false, true},
+		{"sha256 with superblock", 16, "sha256", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataPath, _ := createTestDataFile(t, 4096, tt.numBlocks)
+			defer os.Remove(dataPath)
+
+			hashPath := createTestHashFile(t, int64(4096*uint32(tt.numBlocks)*2))
+			defer os.Remove(hashPath)
+
+			var salt []byte
+			if tt.useSalt {
+				salt = []byte("open-test-salt")
+			}
+
+			params := &VerityParams{
+				HashName:       tt.hashAlgo,
+				DataBlockSize:  4096,
+				HashBlockSize:  4096,
+				DataBlocks:     tt.numBlocks,
+				HashType:       1,
+				Salt:           salt,
+				SaltSize:       uint16(len(salt)),
+				HashAreaOffset: 0,
+				NoSuperblock:   tt.noSuperblock,
+			}
+
+			var rootHash []byte
+			var err error
+			if tt.noSuperblock {
+				rootHash, err = VerityCreate(params, dataPath, hashPath)
+				if err != nil {
+					t.Fatalf("VerityCreate failed: %v", err)
+				}
+			} else {
+				uuidStr := uuid.New().String()
+				params.HashAreaOffset = 4096
+				parsedUUID, _ := uuid.Parse(uuidStr)
+				copy(params.UUID[:], parsedUUID[:])
+
+				rootHash, err = VerityCreate(params, dataPath, hashPath)
+				if err != nil {
+					t.Fatalf("VerityCreate failed: %v", err)
+				}
+			}
+
+			dataLoop, err := utils.AttachLoopDevice(dataPath)
+			if err != nil {
+				t.Fatalf("Failed to setup data loop device: %v", err)
+			}
+			defer func() {
+				if err := utils.DetachLoopDevice(dataLoop); err != nil {
+					t.Logf("Failed to detach data loop device: %v", err)
+				}
+			}()
+
+			hashLoop, err := utils.AttachLoopDevice(hashPath)
+			if err != nil {
+				t.Fatalf("Failed to setup hash loop device: %v", err)
+			}
+			defer func() {
+				if err := utils.DetachLoopDevice(hashLoop); err != nil {
+					t.Logf("Failed to detach hash loop device: %v", err)
+				}
+			}()
+
+			deviceName := fmt.Sprintf("verity-test-%d", os.Getpid())
+			devPath, err := VerityOpen(params, deviceName, dataLoop, hashLoop, rootHash, "", nil)
+			if err != nil {
+				t.Fatalf("VerityOpen failed: %v", err)
+			}
+			defer func() {
+				if err := VerityClose(deviceName); err != nil {
+					t.Logf("Failed to close device: %v", err)
+				}
+			}()
+
+			if devPath != "/dev/mapper/"+deviceName {
+				t.Errorf("Unexpected device path: got %s, want %s", devPath, "/dev/mapper/"+deviceName)
+			}
+
+			if _, err := os.Stat(devPath); err != nil {
+				t.Errorf("Device path does not exist: %v", err)
+			}
+		})
+	}
+}
+
+func TestVerityClose(t *testing.T) {
+	dataPath, _ := createTestDataFile(t, 4096, 16)
+	defer os.Remove(dataPath)
+
+	hashPath := createTestHashFile(t, int64(4096*16*2))
+	defer os.Remove(hashPath)
+
+	dataLoop, err := utils.AttachLoopDevice(dataPath)
+	if err != nil {
+		t.Fatalf("Failed to setup data loop device: %v", err)
+	}
+	defer func() {
+		if err := utils.DetachLoopDevice(dataLoop); err != nil {
+			t.Logf("Failed to detach data loop device: %v", err)
+		}
+	}()
+
+	hashLoop, err := utils.AttachLoopDevice(hashPath)
+	if err != nil {
+		t.Fatalf("Failed to setup hash loop device: %v", err)
+	}
+	defer func() {
+		if err := utils.DetachLoopDevice(hashLoop); err != nil {
+			t.Logf("Failed to detach hash loop device: %v", err)
+		}
+	}()
+
+	params := &VerityParams{
+		HashName:       "sha256",
+		DataBlockSize:  4096,
+		HashBlockSize:  4096,
+		DataBlocks:     16,
+		HashType:       1,
+		Salt:           []byte("close-test"),
+		SaltSize:       10,
+		HashAreaOffset: 0,
+		NoSuperblock:   true,
+	}
+
+	rootHash, err := VerityCreate(params, dataPath, hashPath)
+	if err != nil {
+		t.Fatalf("VerityCreate failed: %v", err)
+	}
+
+	deviceName := fmt.Sprintf("verity-close-test-%d", os.Getpid())
+	devPath, err := VerityOpen(params, deviceName, dataLoop, hashLoop, rootHash, "", nil)
+	if err != nil {
+		t.Fatalf("VerityOpen failed: %v", err)
+	}
+
+	if _, err := os.Stat(devPath); err != nil {
+		t.Fatalf("Device path does not exist before close: %v", err)
+	}
+
+	if err := VerityClose(deviceName); err != nil {
+		t.Errorf("VerityClose failed: %v", err)
+	}
+
+	if _, err := os.Stat(devPath); err == nil {
+		t.Errorf("Device path still exists after close")
+	}
+
+	if err := VerityClose(deviceName); err == nil {
+		t.Errorf("VerityClose should fail on non-existent device")
+	}
+}
+
+func TestVerityCheck(t *testing.T) {
+	tests := []struct {
+		name             string
+		hashAlgo         string
+		checkRootHash    bool
+		useWrongRootHash bool
+		expectedResult   bool
+	}{
+		{"sha256 no hash check", "sha256", false, false, true},
+		{"sha256 with correct hash", "sha256", true, false, true},
+		{"sha256 with wrong hash", "sha256", true, true, false},
+		{"sha512 with correct hash", "sha512", true, false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataPath, _ := createTestDataFile(t, 4096, 16)
+			defer os.Remove(dataPath)
+
+			hashPath := createTestHashFile(t, int64(4096*16*2))
+			defer os.Remove(hashPath)
+
+			dataLoop, err := utils.AttachLoopDevice(dataPath)
+			if err != nil {
+				t.Fatalf("Failed to setup data loop device: %v", err)
+			}
+			defer func() {
+				if err := utils.DetachLoopDevice(dataLoop); err != nil {
+					t.Logf("Failed to detach data loop device: %v", err)
+				}
+			}()
+
+			hashLoop, err := utils.AttachLoopDevice(hashPath)
+			if err != nil {
+				t.Fatalf("Failed to setup hash loop device: %v", err)
+			}
+			defer func() {
+				if err := utils.DetachLoopDevice(hashLoop); err != nil {
+					t.Logf("Failed to detach hash loop device: %v", err)
+				}
+			}()
+
+			params := &VerityParams{
+				HashName:       tt.hashAlgo,
+				DataBlockSize:  4096,
+				HashBlockSize:  4096,
+				DataBlocks:     16,
+				HashType:       1,
+				Salt:           []byte("check-test"),
+				SaltSize:       10,
+				HashAreaOffset: 0,
+				NoSuperblock:   true,
+			}
+
+			rootHash, err := VerityCreate(params, dataPath, hashPath)
+			if err != nil {
+				t.Fatalf("VerityCreate failed: %v", err)
+			}
+
+			deviceName := fmt.Sprintf("verity-check-test-%d", os.Getpid())
+			_, err = VerityOpen(params, deviceName, dataLoop, hashLoop, rootHash, "", nil)
+			if err != nil {
+				t.Fatalf("VerityOpen failed: %v", err)
+			}
+			defer func() {
+				if err := VerityClose(deviceName); err != nil {
+					t.Logf("Failed to close verity device: %v", err)
+				}
+			}()
+
+			var checkHash []byte
+			if tt.checkRootHash {
+				if tt.useWrongRootHash {
+					checkHash = make([]byte, len(rootHash))
+					for i := range checkHash {
+						checkHash[i] = ^rootHash[i]
+					}
+				} else {
+					checkHash = rootHash
+				}
+			}
+
+			result := VerityCheck(deviceName, checkHash)
+			if result != tt.expectedResult {
+				t.Errorf("VerityCheck() = %v, want %v", result, tt.expectedResult)
+			}
+		})
+	}
+}

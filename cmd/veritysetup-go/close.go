@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	dm "github.com/ChengyuZhu6/veritysetup-go/pkg/dm"
+	verity "github.com/ChengyuZhu6/veritysetup-go/pkg/verity"
 )
 
 func parseCloseArgs(args []string) (string, error) {
@@ -23,20 +23,10 @@ func parseCloseArgs(args []string) (string, error) {
 }
 
 func runClose(name string) error {
-	c, err := dm.Open()
-	if err != nil {
-		return fmt.Errorf("open dm control: %w", err)
-	}
-	defer c.Close()
-
-	_, err = c.DeviceStatus(name)
-	if err != nil {
-		return fmt.Errorf("device '%s' not found or inaccessible: %w", name, err)
+	if err := verity.VerityClose(name); err != nil {
+		return err
 	}
 
-	if err := c.RemoveDevice(name); err != nil {
-		return fmt.Errorf("remove device: %w", err)
-	}
 	fmt.Printf("/dev/mapper/%s removed\n", name)
 	return nil
 }
