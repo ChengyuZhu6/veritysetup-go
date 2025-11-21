@@ -1,0 +1,13 @@
+Go-dmverity project maintainers
+#
+# See https://github.com/containerd/project/blob/main/GOVERNANCE.md#maintainership for committer versus reviewer roles
+#
+# Core containerd maintainers are also maintainers of the go-dmverity project,
+# see https://github.com/containerd/project/blob/main/MAINTAINERS
+#
+# COMMITTERS
+# GitHub ID, Name, Email address,GPG fingerprint
+"ChengyuZhu6","Chengyu Zhu","hudson@cyzhu.com",""
+#
+# REVIEWERS
+# GitHub ID, Name, Email address, GPG fingerprint
