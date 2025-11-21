@@ -14,29 +14,37 @@
    limitations under the License.
 */
 
-package keyring
+package main
 
 import (
-	"testing"
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/containerd/go-dmverity/pkg/verity"
 )
 
-func TestAddAndUnlinkKey(t *testing.T) {
-	if err := CheckKeyringSupport(); err != nil {
-		t.Skipf("Keyring not supported: %v", err)
+func parseDumpArgs(args []string) (string, error) {
+	fs := flag.NewFlagSet("dump", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	if err := fs.Parse(args); err != nil {
+		return "", err
 	}
 
-	payload := []byte("test-payload")
-	keyID, err := AddKeyToThreadKeyring("user", "test-key", payload)
+	if fs.NArg() != 1 {
+		return "", fmt.Errorf("dump requires exactly one argument: <hash_device>")
+	}
+
+	return fs.Arg(0), nil
+}
+
+func runDump(hashPath string) error {
+	output, err := verity.DumpDevice(hashPath)
 	if err != nil {
-		t.Fatalf("Failed to add key: %v", err)
+		return err
 	}
 
-	if keyID == 0 {
-		t.Fatal("Expected non-zero key ID")
-	}
-
-	err = UnlinkKeyFromThreadKeyring(keyID)
-	if err != nil {
-		t.Fatalf("Failed to unlink key: %v", err)
-	}
+	fmt.Print(output)
+	return nil
 }

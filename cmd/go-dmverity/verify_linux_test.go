@@ -1,3 +1,19 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package main
 
 import (
@@ -5,7 +21,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
+	"github.com/containerd/go-dmverity/pkg/utils"
 )
 
 func TestVerify(t *testing.T) {
@@ -99,7 +115,7 @@ func TestVerify_CorruptedData(t *testing.T) {
 	}
 	f.Close()
 
-	cmd := exec.Command("veritysetup-go", "verify", data, hash, rootHex)
+	cmd := exec.Command("go-dmverity", "verify", data, hash, rootHex)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Errorf("expected verification to fail for corrupted data, got output: %s", string(out))
@@ -110,7 +126,7 @@ func TestVerify_WrongRootHash(t *testing.T) {
 	data, hash, _ := utils.CreateFormattedFiles(t)
 
 	wrongRoot := "0000000000000000000000000000000000000000000000000000000000000000"
-	cmd := exec.Command("veritysetup-go", "verify", "--hash", "sha256", "--data-block-size", "4096", "--hash-block-size", "4096", "--salt", "-", data, hash, wrongRoot)
+	cmd := exec.Command("go-dmverity", "verify", "--hash", "sha256", "--data-block-size", "4096", "--hash-block-size", "4096", "--salt", "-", data, hash, wrongRoot)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Errorf("expected verification to fail with wrong root hash, got output: %s", string(out))
