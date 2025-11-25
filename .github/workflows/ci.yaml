@@ -6,21 +6,22 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  GO_VERSION: '1.24.x'
+
 jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        go-version: [ '1.24.x' ]
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          go-version: ${{ matrix.go-version }}
+          path: src/github.com/containerd/go-dmverity
+      - name: Setup Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Install dm tooling
         run: |
@@ -29,9 +30,6 @@ jobs:
           sudo modprobe dm-mod
           sudo modprobe dm-zero
           sudo modprobe dm-verity
-
-      - name: Install dependencies
-        run: go mod download
 
       - name: Build
         run: sudo make && sudo make install
@@ -46,15 +44,37 @@ jobs:
     name: Lint
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
         with:
-          go-version: '1.24.x'
+          go-version: ${{ env.GO_VERSION }}
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@971e284b6050e8a5849b72094c50ab08da042db8 # v6.1.1
         with:
-          version: latest
+          version: v1.60.3
           args: --timeout=5m
+          skip-cache: true
+          working-directory: src/github.com/containerd/go-dmverity
+
+  project:
+    name: Project Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          path: src/github.com/containerd/go-dmverity
+          fetch-depth: 25
+      - name: Setup Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: containerd/project-checks@d7751f3c375b8fe4a84c02a068184ee4c1f59bc4 # v1.2.2
+        with:
+          working-directory: src/github.com/containerd/go-dmverity

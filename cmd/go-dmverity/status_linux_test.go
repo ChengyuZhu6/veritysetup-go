@@ -1,3 +1,19 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package main
 
 import (
@@ -5,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ChengyuZhu6/veritysetup-go/pkg/utils"
+	"github.com/containerd/go-dmverity/pkg/utils"
 )
 
 func TestStatus_DeviceStatus(t *testing.T) {
@@ -84,7 +100,7 @@ func TestStatus_CrossImplementation(t *testing.T) {
 	outC := string(outCBytes)
 
 	if strings.TrimSpace(outGo) == "" {
-		t.Fatalf("empty veritysetup-go status output")
+		t.Fatalf("empty go-dmverity status output")
 	}
 	if strings.TrimSpace(outC) == "" {
 		t.Fatalf("empty veritysetup status output")
@@ -140,7 +156,7 @@ func TestStatus_InactiveDevice(t *testing.T) {
 	utils.RequireTool(t, "dmsetup")
 
 	name := "vgo-status-nonexistent"
-	cmd := exec.Command("veritysetup-go", "status", name)
+	cmd := exec.Command("go-dmverity", "status", name)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Errorf("expected error for non-existent device, got output: %s", string(out))
